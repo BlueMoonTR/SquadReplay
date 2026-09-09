@@ -1,0 +1,92 @@
+SquadReplay Agent Source-Available License 1.0
+
+Copyright (c) 2026 BlueMoonTR / the SquadReplay project.
+
+This repository contains the source code for the SquadReplay agent — the
+component that runs on a Squad dedicated game server, reads live match
+data from the game process's memory, and pushes it to a SquadReplay
+central server (squadreplay.com or a self-hosted equivalent). It is
+published so that anyone considering running the compiled agent binary
+on their own server can read exactly what it does before trusting it —
+including reading and writing files, network endpoints it contacts, and
+the process-memory access it requires.
+
+1. Definitions
+
+"The Software" means the source code, object code, and documentation
+contained in this repository, and any portion or modification of it.
+
+"You" means the individual or entity exercising rights under this
+license.
+
+"Licensor" means the copyright holder named above.
+
+2. Grant of Rights
+
+Subject to the restrictions in Section 3, Licensor grants You a
+worldwide, royalty-free, non-exclusive license to:
+
+  a. read, study, and audit the Software for any purpose, including
+     verifying that a compiled binary's behavior matches this source;
+
+  b. copy, compile, and run the Software, unmodified or modified, on
+     computers You own or control, to monitor and record matches on
+     Squad game servers You operate or are authorized to administer;
+
+  c. create and share patches, bug reports, and pull requests intended
+     to be merged back into this repository.
+
+3. Restrictions
+
+You may NOT, without Licensor's prior written permission:
+
+  a. offer the Software, in whole or in part, modified or unmodified,
+     to any third party as a hosted, managed, or "as-a-service"
+     product — i.e., You may not operate a competing service built on
+     the Software for others;
+
+  b. redistribute copies or forks of the Software to third parties,
+     whether for a fee or free of charge, other than through this
+     repository's own official channel;
+
+  c. remove or alter this license, the copyright notice above, or any
+     notice in the Software crediting its origin;
+
+  d. use the Software, or a derivative of it, to build a product or
+     service that is materially similar to and competes with
+     SquadReplay.
+
+Running the Software on Your own Squad server(s) to monitor Your own
+community's matches — including a community that charges its own
+players or members for access — is explicitly permitted and is not,
+by itself, "offering the Software as a service" under 3(a); that
+restriction targets reselling or re-hosting SquadReplay's own
+functionality to others, not operating a Squad game server.
+
+4. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF,
+OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE — INCLUDING, WITHOUT LIMITATION, ANY DAMAGE TO THE GAME
+SERVER PROCESS OR HOST THE SOFTWARE IS RUN AGAINST.
+
+5. Termination
+
+Your rights under this license terminate automatically if You breach
+any of the restrictions in Section 3. Licensor may also grant
+additional permissions, or release the Software (or any version of
+it) under a different license, at Licensor's sole discretion, without
+affecting the rights already granted under this license for versions
+already published.
+
+6. What This License Is Not
+
+This is not the MIT, Apache, GPL, or any OSI-approved open-source
+license — it does not meet the Open Source Definition's requirement
+that a license impose no restriction on the field of use. It is a
+source-available license: the code is open to read and to run for
+Your own purposes, but not to redistribute or resell.
