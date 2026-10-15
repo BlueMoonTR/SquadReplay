@@ -87,7 +87,9 @@ sudo python3 squadreplay-agent-read.py --install --enroll <token>
 
 `--install` auto-detects the running `SquadGameServer`, chooses a deploy
 directory (default `~/BOTS/SquadReplay` of the Squad user; override with
-`--deploy-dir`), and provisions the agent with central. It is idempotent —
+`--deploy-dir`), creates the local stats file
+([`player-stats.sqlite`](#your-own-copy-of-the-stats-player-statssqlite)),
+and provisions the agent with central. It is idempotent —
 safe to re-run as a repair step. A **voice** variant additionally installs
 `python3-bpfcc` and a narrow sudoers rule for the capture tap, and asks you to
 accept the data-controller responsibility ([LEGAL.md](LEGAL.md)); pass
@@ -137,6 +139,41 @@ enabled, it moves specified players ahead of others in Squad's native join
 queue by writing to that queue's memory. Nothing else in any variant writes
 to your process. The `read` variants cannot do this — they are built
 without the code for it.
+
+## Your own copy of the stats: `player-stats.sqlite`
+
+Every variant keeps a local SQLite file, `player-stats.sqlite`, in the
+agent's directory (`--install` creates it). It holds every match your server
+plays, with the same per-player numbers the SquadReplay leaderboard shows —
+they are computed by the same code from the same snapshots:
+
+- `match` — layer, mode, factions, tickets, winner, duration;
+  `complete = 1` once the match's end was seen
+- `player` — EOS ID, last name, clan tag
+- `match_player` — per player per match: kills, deaths, wounds, teamkills,
+  vehicle kills and the infantry / vehicle split of each, revives, heals,
+  scores, time played / as squad leader / fireteam leader / commander / in a
+  squad, distance on foot and driving, longest kill (and its weapon),
+  supplies delivered, FOBs and HABs built, rallies placed, FOBs destroyed,
+  vehicle damage, captures, defenses
+- `kill_event` — every kill: killer, victim, weapon, distance, vehicles
+- `vehicle_session` — who sat in which vehicle seat, for how long
+
+A running match is written once a minute and finalised when it ends; a
+restart of the agent resumes it. ELO is not in it (it is computed centrally)
+and neither are SteamIDs (they come from RCON, on the central side).
+
+```sh
+sqlite3 player-stats.sqlite \
+  "SELECT p.last_name, SUM(mp.kills), SUM(mp.deaths), SUM(mp.rallies_placed)
+   FROM match_player mp JOIN player p USING (eos_id)
+   GROUP BY mp.eos_id ORDER BY 2 DESC LIMIT 10"
+```
+
+The file holds player identifiers and names, so it is created readable by
+the agent's user only (`0600`). Keeping it is your responsibility as the data
+controller ([LEGAL.md](LEGAL.md)) — a player's erasure request covers it too.
+`--no-local-db` turns it off; `--local-db PATH` puts it elsewhere.
 
 ## How it reaches your process
 

@@ -23,9 +23,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.85.0'
-_BUILT_FROM = '0c7924f96c30'
-_SECTION_SHA256 = '4c9d2b11386153344f310ef02708cd46badecb85333354178640b37d23b92217'
+_VERSION = '0.85.1'
+_BUILT_FROM = '858d263d1ef2+modified'
+_SECTION_SHA256 = 'b78f553fa96b3906c3682598c22991c050f76ea0445a1212b685acd217ec7afe'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -765,6 +765,21 @@ if __name__ == "__main__":
 #|     _chown_recursive(sh, user)
 #|     logger.info("wrote %s", sh)
 #|
+#| def _create_local_stats_db(workdir: Path, user: str) -> Path | None:
+#|     """Create ``<workdir>/player-stats.sqlite`` with its schema, owned by"""
+#|     from agent import local_db
+#|     path = workdir / local_db.DEFAULT_FILENAME
+#|     try:
+#|         local_db.open_db(path).close()
+#|         for p in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+#|             if p.exists():
+#|                 _chown_recursive(p, user)
+#|     except Exception as exc:  # noqa: BLE001 -- never fail the install on this
+#|         logger.warning("could not create %s (%s); the agent will create it", path, exc)
+#|         return None
+#|     logger.info("player stats will be kept in %s", path)
+#|     return path
+#|
 #| def _chown_recursive(path: Path, user: str) -> None:
 #|     import pwd
 #|     pw = pwd.getpwnam(user)
@@ -905,6 +920,9 @@ if __name__ == "__main__":
 #|         )
 #|         _chown_recursive(config_path, target_user)
 #|         logger.info("wrote %s", config_path)
+#|
+#|     # 4b. player-stats.sqlite: the community's own copy of every match's
+#|     _create_local_stats_db(workdir, target_user)
 #|
 #|     # 5. Enrollment — only if operator passed a token. Without it we
 #|     if enroll_token:
@@ -1301,6 +1319,515 @@ if __name__ == "__main__":
 #| def variant_name(caps: tuple[str, ...] | None = None) -> str:
 #|     """``read`` / ``read-write`` -- the name the release files use."""
 #|     return "-".join(caps if caps is not None else detect())
+#| ===== module: agent.local_db =====
+#| """agent/local_db.py -- the community's own copy of its match stats."""
+#| from __future__ import annotations
+#|
+#| import json
+#| import os
+#| import sqlite3
+#| from pathlib import Path
+#| from typing import Any
+#|
+#| DEFAULT_FILENAME = "player-stats.sqlite"
+#| SCHEMA_VERSION = 1
+#|
+#| # Column order of each table after its match_id -- the same order as
+#| MATCH_PLAYER = (
+#|     ("eos_id", "TEXT NOT NULL"),
+#|     ("team_id", "INTEGER"),
+#|     ("squad_id", "INTEGER"),
+#|     ("squad_name", "TEXT"),
+#|     ("squad_locked", "INTEGER"),
+#|     ("role_id", "TEXT"),
+#|     ("is_squad_leader", "INTEGER"),
+#|     ("is_commander", "INTEGER"),
+#|     ("kills", "INTEGER"),
+#|     ("deaths", "INTEGER"),
+#|     ("wounds", "INTEGER"),
+#|     ("woundeds", "INTEGER"),
+#|     ("teamkills", "INTEGER"),
+#|     ("vehicle_kills", "INTEGER"),
+#|     ("revived_pts", "REAL"),
+#|     ("heal_pts", "REAL"),
+#|     ("score", "REAL"),
+#|     ("teamwork_score", "REAL"),
+#|     ("objective_score", "REAL"),
+#|     ("combat_score", "REAL"),
+#|     ("time_played_s", "INTEGER"),
+#|     ("time_as_sl_s", "INTEGER"),
+#|     ("time_as_ftl_s", "INTEGER"),
+#|     ("time_as_commander_s", "INTEGER"),
+#|     ("infantry_distance_m", "REAL"),
+#|     ("vehicle_distance_m", "REAL"),
+#|     ("longest_kill_m", "REAL"),
+#|     ("longest_kill_weapon", "TEXT"),
+#|     ("longest_kill_vehicle", "TEXT"),
+#|     ("longest_kill_seat", "INTEGER"),
+#|     ("kills_inf", "INTEGER"),
+#|     ("kills_veh", "INTEGER"),
+#|     ("deaths_inf", "INTEGER"),
+#|     ("deaths_veh", "INTEGER"),
+#|     ("vehicle_kills_inf", "INTEGER"),
+#|     ("vehicle_kills_veh", "INTEGER"),
+#|     ("wounds_inf", "INTEGER"),
+#|     ("wounds_veh", "INTEGER"),
+#|     ("was_winner", "INTEGER"),
+#|     ("squads_led", "INTEGER"),
+#|     ("supplies_delivered", "INTEGER"),
+#|     ("fobs_destroyed", "INTEGER"),
+#|     ("fobs_built", "INTEGER"),
+#|     ("habs_built", "INTEGER"),
+#|     ("rallies_placed", "INTEGER"),
+#|     ("vehicle_damage", "INTEGER"),
+#|     ("captures", "INTEGER"),
+#|     ("defenses", "INTEGER"),
+#|     ("time_admin_cam_s", "INTEGER"),
+#|     ("time_in_squad_s", "INTEGER"),
+#| )
+#|
+#| KILL_EVENT = (
+#|     ("t_seconds", "INTEGER"),
+#|     ("killer_eos", "TEXT"),
+#|     ("victim_eos", "TEXT"),
+#|     ("killer_team", "INTEGER"),
+#|     ("victim_team", "INTEGER"),
+#|     ("weapon_class", "TEXT"),
+#|     ("distance_m", "REAL"),
+#|     ("killer_in_vehicle", "INTEGER"),
+#|     ("killer_vehicle_class", "TEXT"),
+#|     ("killer_seat", "INTEGER"),
+#|     ("victim_in_vehicle", "INTEGER"),
+#|     ("victim_vehicle_class", "TEXT"),
+#|     ("was_teamkill", "INTEGER"),
+#|     ("damage_type", "TEXT"),
+#|     ("is_vehicle_weapon", "INTEGER"),
+#|     ("killer_x", "REAL"),
+#|     ("killer_y", "REAL"),
+#|     ("victim_x", "REAL"),
+#|     ("victim_y", "REAL"),
+#| )
+#|
+#| VEHICLE_SESSION = (
+#|     ("eos_id", "TEXT"),
+#|     ("vehicle_class", "TEXT"),
+#|     ("seat", "INTEGER"),
+#|     ("entered_at_s", "INTEGER"),
+#|     ("exited_at_s", "INTEGER"),
+#|     ("distance_m", "REAL"),
+#|     ("kills_in_seat", "INTEGER"),
+#| )
+#|
+#| def _cols(spec) -> str:
+#|     return ",\n    ".join(f"{name} {typ}" for name, typ in spec)
+#|
+#| SCHEMA = f"""
+#| CREATE TABLE IF NOT EXISTS meta (
+#|     key   TEXT PRIMARY KEY,
+#|     value TEXT
+#| );
+#|
+#| -- One row per match. complete = 1 once the match's end (or a map
+#| -- change to the training range) was seen; 0 while it is running, or if
+#| -- the agent missed its end.
+#| CREATE TABLE IF NOT EXISTS match (
+#|     match_id    TEXT PRIMARY KEY,
+#|     server_id   TEXT,
+#|     layer       TEXT,
+#|     game_mode   TEXT,
+#|     started_at  TEXT,
+#|     ended_at    TEXT,
+#|     duration_s  INTEGER,
+#|     t1_faction  TEXT,
+#|     t2_faction  TEXT,
+#|     t1_tickets  INTEGER,
+#|     t2_tickets  INTEGER,
+#|     winner      INTEGER,
+#|     snap_count  INTEGER,
+#|     complete    INTEGER NOT NULL DEFAULT 0,
+#|     updated_at  TEXT
+#| );
+#|
+#| CREATE TABLE IF NOT EXISTS player (
+#|     eos_id     TEXT PRIMARY KEY,
+#|     steam_id   TEXT,
+#|     last_name  TEXT,
+#|     clan_tag   TEXT,
+#|     first_seen TEXT,
+#|     last_seen  TEXT
+#| );
+#|
+#| CREATE TABLE IF NOT EXISTS match_player (
+#|     match_id TEXT NOT NULL REFERENCES match(match_id) ON DELETE CASCADE,
+#|     {_cols(MATCH_PLAYER)},
+#|     PRIMARY KEY (match_id, eos_id)
+#| );
+#| CREATE INDEX IF NOT EXISTS match_player_eos ON match_player(eos_id);
+#|
+#| CREATE TABLE IF NOT EXISTS kill_event (
+#|     match_id TEXT NOT NULL REFERENCES match(match_id) ON DELETE CASCADE,
+#|     {_cols(KILL_EVENT)}
+#| );
+#| CREATE INDEX IF NOT EXISTS kill_event_match ON kill_event(match_id);
+#| CREATE INDEX IF NOT EXISTS kill_event_killer ON kill_event(killer_eos);
+#| CREATE INDEX IF NOT EXISTS kill_event_victim ON kill_event(victim_eos);
+#|
+#| CREATE TABLE IF NOT EXISTS vehicle_session (
+#|     match_id TEXT NOT NULL REFERENCES match(match_id) ON DELETE CASCADE,
+#|     {_cols(VEHICLE_SESSION)}
+#| );
+#| CREATE INDEX IF NOT EXISTS vehicle_session_match ON vehicle_session(match_id);
+#|
+#| -- The running match's accumulator, saved with every flush so an agent
+#| -- restart resumes it instead of starting the match over. One row.
+#| CREATE TABLE IF NOT EXISTS mirror_state (
+#|     id         INTEGER PRIMARY KEY CHECK (id = 1),
+#|     saved_at   TEXT,
+#|     state_json TEXT NOT NULL
+#| );
+#| """
+#|
+#| def open_db(path: str | os.PathLike) -> sqlite3.Connection:
+#|     """Open (creating if absent) the stats file with its schema applied."""
+#|     path = Path(path)
+#|     if not path.exists():
+#|         # Create it 0600 before SQLite touches it: SQLite then gives the
+#|         fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+#|         os.close(fd)
+#|     conn = sqlite3.connect(str(path), timeout=5.0)
+#|     conn.execute("PRAGMA journal_mode=WAL")
+#|     conn.execute("PRAGMA foreign_keys=ON")
+#|     conn.execute("PRAGMA busy_timeout=5000")
+#|     with conn:
+#|         conn.executescript(SCHEMA)
+#|         conn.execute(
+#|             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+#|             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+#|             (str(SCHEMA_VERSION),))
+#|     return conn
+#|
+#| def _insert_sql(table: str, spec) -> str:
+#|     names = ["match_id"] + [n for n, _ in spec]
+#|     return (f"INSERT INTO {table} ({', '.join(names)}) "
+#|             f"VALUES ({', '.join('?' * len(names))})")
+#|
+#| _MP_SQL = _insert_sql("match_player", MATCH_PLAYER)
+#| _KE_SQL = _insert_sql("kill_event", KILL_EVENT)
+#| _VS_SQL = _insert_sql("vehicle_session", VEHICLE_SESSION)
+#|
+#| def _delete_match_rows(conn: sqlite3.Connection, match_id: str) -> None:
+#|     for table in ("match_player", "kill_event", "vehicle_session"):
+#|         conn.execute(f"DELETE FROM {table} WHERE match_id = ?", (match_id,))
+#|
+#| def write_match(conn: sqlite3.Connection, *, match_id: str,
+#|                 server_id: str | None, started_at: str, ended_at: str | None,
+#|                 result: dict[str, Any], complete: bool, now: str,
+#|                 state: dict[str, Any] | None) -> None:
+#|     """Write one ``MatchAccumulator.finalize()`` result, replacing the"""
+#|     with conn:
+#|         _delete_match_rows(conn, match_id)
+#|         if result.get("skipped"):
+#|             conn.execute("DELETE FROM match WHERE match_id = ?", (match_id,))
+#|         else:
+#|             m = result["match"]
+#|             conn.execute(
+#|                 """
+#|                 INSERT INTO match (match_id, server_id, layer, game_mode,
+#|                                    started_at, ended_at, duration_s,
+#|                                    t1_faction, t2_faction, t1_tickets, t2_tickets,
+#|                                    winner, snap_count, complete, updated_at)
+#|                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#|                 ON CONFLICT(match_id) DO UPDATE SET
+#|                     server_id = excluded.server_id,
+#|                     layer = excluded.layer,
+#|                     game_mode = excluded.game_mode,
+#|                     ended_at = excluded.ended_at,
+#|                     duration_s = excluded.duration_s,
+#|                     t1_faction = excluded.t1_faction,
+#|                     t2_faction = excluded.t2_faction,
+#|                     t1_tickets = excluded.t1_tickets,
+#|                     t2_tickets = excluded.t2_tickets,
+#|                     winner = excluded.winner,
+#|                     snap_count = excluded.snap_count,
+#|                     complete = excluded.complete,
+#|                     updated_at = excluded.updated_at
+#|                 """,
+#|                 (match_id, server_id, m["layer"], m["game_mode"],
+#|                  started_at, ended_at, m["duration_s"],
+#|                  m["t1_faction"], m["t2_faction"], m["t1_tickets"], m["t2_tickets"],
+#|                  m["winner"], result["snap_count"], int(bool(complete)), now))
+#|             for p in result["players"]:
+#|                 steam = p.get("steam_id")
+#|                 conn.execute(
+#|                     """
+#|                     INSERT INTO player (eos_id, steam_id, last_name, clan_tag,
+#|                                         first_seen, last_seen)
+#|                     VALUES (?, ?, ?, ?, ?, ?)
+#|                     ON CONFLICT(eos_id) DO UPDATE SET
+#|                         steam_id   = COALESCE(excluded.steam_id, player.steam_id),
+#|                         -- No plausible name all match: keep the one on file.
+#|                         last_name  = CASE WHEN excluded.last_name = ''
+#|                                           THEN player.last_name
+#|                                           ELSE excluded.last_name END,
+#|                         -- The match's own tag, '' included (central's rule:
+#|                         -- the accumulator already kept any tag seen).
+#|                         clan_tag   = excluded.clan_tag,
+#|                         first_seen = MIN(player.first_seen, excluded.first_seen),
+#|                         last_seen  = MAX(player.last_seen, excluded.last_seen)
+#|                     """,
+#|                     (p["eos_id"], None if steam is None else str(steam),
+#|                      p["last_name"], p["clan_tag"], started_at, started_at))
+#|             conn.executemany(_MP_SQL, [
+#|                 (match_id,) + tuple(r[n] for n, _ in MATCH_PLAYER)
+#|                 for r in result["match_players"]])
+#|             conn.executemany(_KE_SQL, [
+#|                 (match_id,) + tuple(r[n] for n, _ in KILL_EVENT)
+#|                 for r in result["kill_events"]])
+#|             conn.executemany(_VS_SQL, [
+#|                 (match_id,) + tuple(r[n] for n, _ in VEHICLE_SESSION)
+#|                 for r in result["vehicle_sessions"]])
+#|         if state is None:
+#|             conn.execute("DELETE FROM mirror_state")
+#|         else:
+#|             conn.execute(
+#|                 "INSERT INTO mirror_state (id, saved_at, state_json) VALUES (1, ?, ?) "
+#|                 "ON CONFLICT(id) DO UPDATE SET saved_at = excluded.saved_at, "
+#|                 "state_json = excluded.state_json",
+#|                 (now, json.dumps(state, separators=(",", ":"))))
+#|
+#| def delete_match(conn: sqlite3.Connection, match_id: str) -> None:
+#|     """Drop a match and the saved accumulator (an abandoned empty lobby:"""
+#|     with conn:
+#|         _delete_match_rows(conn, match_id)
+#|         conn.execute("DELETE FROM match WHERE match_id = ?", (match_id,))
+#|         conn.execute("DELETE FROM mirror_state")
+#|
+#| def load_state(conn: sqlite3.Connection) -> dict[str, Any] | None:
+#|     """The saved running-match state, or None (none saved / unreadable)."""
+#|     row = conn.execute("SELECT state_json FROM mirror_state WHERE id = 1").fetchone()
+#|     if not row:
+#|         return None
+#|     try:
+#|         state = json.loads(row[0])
+#|     except ValueError:
+#|         return None
+#|     return state if isinstance(state, dict) else None
+#| ===== module: agent.local_mirror =====
+#| """agent/local_mirror.py -- every snapshot into player-stats.sqlite."""
+#| from __future__ import annotations
+#|
+#| import hashlib
+#| import logging
+#| import time
+#| from datetime import datetime, timedelta, timezone
+#| from pathlib import Path
+#| from typing import Any, Callable
+#|
+#| from agent import local_db
+#|
+#| try:
+#|     from replay_format import match_tag
+#| except ImportError:  # pragma: no cover -- replay_format ships with the loader
+#|     def match_tag(match_id):
+#|         return ""
+#|
+#| logger = logging.getLogger("squad_replay")
+#|
+#| PREMATCH_MAX_WAIT_S = 600.0   # central's REPLAY_PREMATCH_MAX_WAIT_S
+#| FLUSH_INTERVAL_S = 60.0
+#|
+#| _PRE_MATCH = ("Staging", "WaitingToStart")
+#| _POST_MATCH = ("WaitingPostMatch", "LeavingMap", "EndMatch")
+#|
+#| def _is_skipped_map(map_name: str) -> bool:
+#|     return "Jensen" in map_name or map_name == "Jensen's Training Range"
+#|
+#| def _iso(ts: float) -> str:
+#|     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+#|
+#| class LocalMirror:
+#|     """Feeds snapshots into player-stats.sqlite (see module docstring)."""
+#|
+#|     def __init__(self, path: str | Path, *, server_id: str | None = None,
+#|                  clock: Callable[[], float] = time.time,
+#|                  flush_interval_s: float = FLUSH_INTERVAL_S):
+#|         self._path = Path(path)
+#|         self._server_id = server_id
+#|         self._clock = clock
+#|         self._flush_interval_s = flush_interval_s
+#|         self._ms = None              # match_stats, imported on first use
+#|         self._conn = None
+#|         self._off = False            # gave up (no match_stats / no db)
+#|         self._resume_checked = False
+#|         # The open match: its accumulator and what its rows are keyed by.
+#|         self._acc = None
+#|         self._match_id: str | None = None
+#|         self._started_ts: float | None = None
+#|         self._pre_since: float | None = None
+#|         self._last_flush = 0.0
+#|         self._errors = 0
+#|
+#|     # -- public ----------------------------------------------------------
+#|
+#|     def observe(self, snapshot: dict[str, Any]) -> None:
+#|         """Fold one snapshot in; never raises."""
+#|         if self._off:
+#|             return
+#|         try:
+#|             if not self._ready():
+#|                 return
+#|             self._observe(snapshot)
+#|         except Exception:  # noqa: BLE001 -- the mirror must not stop the agent
+#|             self._errors += 1
+#|             if self._errors in (1, 10) or self._errors % 100 == 0:
+#|                 logger.exception("local stats mirror: snapshot not recorded (%d)",
+#|                                  self._errors)
+#|
+#|     def close(self) -> None:
+#|         """Save the running match so the next start resumes it."""
+#|         try:
+#|             if self._acc is not None and self._conn is not None:
+#|                 self._flush(complete=False)
+#|         except Exception:  # noqa: BLE001
+#|             logger.exception("local stats mirror: final save failed")
+#|         finally:
+#|             if self._conn is not None:
+#|                 try:
+#|                     self._conn.close()
+#|                 except Exception:  # noqa: BLE001
+#|                     pass
+#|                 self._conn = None
+#|
+#|     # -- internals -------------------------------------------------------
+#|
+#|     def _ready(self) -> bool:
+#|         if self._conn is not None:
+#|             return True
+#|         try:
+#|             import match_stats  # the read payload's; absent in older payloads
+#|         except ImportError:
+#|             logger.info("local stats mirror off: this read payload has no "
+#|                         "match_stats (player-stats.sqlite not updated)")
+#|             self._off = True
+#|             return False
+#|         try:
+#|             conn = local_db.open_db(self._path)
+#|         except Exception as exc:  # noqa: BLE001
+#|             logger.warning("local stats mirror off: cannot open %s (%s)",
+#|                            self._path, exc)
+#|             self._off = True
+#|             return False
+#|         self._ms = match_stats
+#|         self._conn = conn
+#|         logger.info("local stats mirror -> %s", self._path)
+#|         return True
+#|
+#|     def _resume(self) -> None:
+#|         """Pick up the match an earlier run of the agent saved."""
+#|         self._resume_checked = True
+#|         saved = local_db.load_state(self._conn)
+#|         if not saved:
+#|             return
+#|         try:
+#|             acc = self._ms.MatchAccumulator.from_state(saved["acc"])
+#|             match_id = saved["match_id"]
+#|             started_ts = float(saved["started_ts"])
+#|             pre_since = saved.get("pre_since")
+#|         except (KeyError, TypeError, ValueError):
+#|             logger.warning("local stats mirror: saved match state unreadable, discarded")
+#|             return
+#|         self._acc = acc
+#|         self._match_id = match_id
+#|         self._started_ts = started_ts
+#|         self._pre_since = None if pre_since is None else float(pre_since)
+#|         self._last_flush = self._clock()
+#|         logger.info("local stats mirror: resumed match %s (%d snapshots)",
+#|                     match_id, acc.snap_count)
+#|
+#|     def _observe(self, snap: dict[str, Any]) -> None:
+#|         if not self._resume_checked:
+#|             self._resume()
+#|         gi = snap.get("gameInfo") or {}
+#|         state = gi.get("matchState") or ""
+#|         map_name = gi.get("mapName") or ""
+#|         skipped = _is_skipped_map(map_name)
+#|         pre = state in _PRE_MATCH
+#|         now = self._clock()
+#|
+#|         close_after = False
+#|         if self._acc is not None and skipped:
+#|             self._finish()                        # closed without this snapshot
+#|         elif (self._acc is not None and self._pre_since is not None and pre
+#|               and now - self._pre_since > PREMATCH_MAX_WAIT_S):
+#|             local_db.delete_match(self._conn, self._match_id)
+#|             self._clear()
+#|         elif self._acc is not None and state in _POST_MATCH:
+#|             close_after = True
+#|             self._pre_since = None
+#|         elif self._acc is not None and state == "InProgress" and self._pre_since is not None:
+#|             self._pre_since = None
+#|
+#|         if self._acc is None and (state == "InProgress" or pre) and not skipped:
+#|             self._open(gi, pre, now)
+#|
+#|         if self._acc is None:
+#|             return
+#|         self._acc.update(snap)
+#|         if close_after:
+#|             self._finish()
+#|         elif now - self._last_flush >= self._flush_interval_s:
+#|             self._flush(complete=False)
+#|
+#|     def _open(self, gi: dict[str, Any], pre: bool, now: float) -> None:
+#|         self._acc = self._ms.MatchAccumulator()
+#|         self._started_ts = now
+#|         self._match_id = match_tag(gi.get("matchId")) or hashlib.sha1(
+#|             f"{_iso(now)}|{gi.get('mapName') or ''}".encode("utf-8")).hexdigest()[:8]
+#|         self._pre_since = now if pre else None
+#|         self._last_flush = now
+#|
+#|     def _flush(self, *, complete: bool) -> None:
+#|         try:
+#|             result = self._acc.finalize()
+#|         except ValueError:                        # nothing folded in yet
+#|             return
+#|         now = self._clock()
+#|         duration = result["match"]["duration_s"] or 0
+#|         state = None if complete else {
+#|             "acc": self._acc.to_state(),
+#|             "match_id": self._match_id,
+#|             "started_ts": self._started_ts,
+#|             "pre_since": self._pre_since,
+#|         }
+#|         t0 = time.monotonic()
+#|         local_db.write_match(
+#|             self._conn,
+#|             match_id=self._match_id,
+#|             server_id=self._server_id,
+#|             started_at=_iso(self._started_ts),
+#|             ended_at=(datetime.fromtimestamp(self._started_ts, tz=timezone.utc)
+#|                       + timedelta(seconds=duration)).isoformat(timespec="seconds"),
+#|             result=result,
+#|             complete=complete,
+#|             now=_iso(now),
+#|             state=state,
+#|         )
+#|         took = time.monotonic() - t0
+#|         if took > 1.0:
+#|             logger.warning("local stats mirror: flush took %.1fs", took)
+#|         self._last_flush = now
+#|
+#|     def _finish(self) -> None:
+#|         self._flush(complete=True)
+#|         if complete_id := self._match_id:
+#|             logger.info("local stats mirror: match %s recorded", complete_id)
+#|         self._clear()
+#|
+#|     def _clear(self) -> None:
+#|         self._acc = None
+#|         self._match_id = None
+#|         self._started_ts = None
+#|         self._pre_since = None
 #| ===== module: agent.memory_backend =====
 #| """agent/memory_backend.py — Linux process-memory backend (pymem-compatible)."""
 #| from __future__ import annotations
@@ -2390,7 +2917,7 @@ if __name__ == "__main__":
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #|
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.85.0"
+#| AGENT_VERSION = "0.85.1"
 #|
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
@@ -4702,6 +5229,14 @@ if __name__ == "__main__":
 #|     parser.add_argument('--mmap-capacity', type=int, default=DEFAULT_CAPACITY,
 #|                         help=f'Max snapshot size in bytes (default {DEFAULT_CAPACITY}). '
 #|                              'Writer auto-grows on overflow.')
+#|     parser.add_argument('--local-db', type=str, default='player-stats.sqlite',
+#|                         metavar='PATH',
+#|                         help='Local copy of every match\'s player stats (SQLite), '
+#|                              'the same numbers as the central leaderboard '
+#|                              '(default: player-stats.sqlite in the working '
+#|                              'directory).')
+#|     parser.add_argument('--no-local-db', action='store_true',
+#|                         help='Do not keep the local player-stats.sqlite.')
 #|     parser.add_argument('--push', type=str, default=None, metavar='URL',
 #|                         help='Base URL of the central ingest server '
 #|                              '(e.g. https://squadreplay.com). Each tick the '
@@ -5010,6 +5545,14 @@ if __name__ == "__main__":
 #|         except OSError as e:
 #|             logger.warning("Data channel unavailable (%s) — using file fallback", e)
 #|             mmap_writer = None
+#|
+#|     # Local player-stats.sqlite: every snapshot pushed below is also folded
+#|     local_mirror = None
+#|     if not args.no_local_db:
+#|         from agent.local_mirror import LocalMirror
+#|         local_mirror = LocalMirror(args.local_db, server_id=args.agent_id)
+#|         import atexit
+#|         atexit.register(local_mirror.close)
 #|
 #|     last_match_state = ''
 #|     leaving_map_count = 0
@@ -5503,6 +6046,9 @@ if __name__ == "__main__":
 #|                 json_str if not args.pretty
 #|                 else json.dumps(sanitized, ensure_ascii=False)
 #|             )
+#|             # After serialising: whatever the mirror does, the bytes pushed
+#|             if local_mirror is not None:
+#|                 local_mirror.observe(sanitized)   # never raises
 #|
 #|             # Publish via shared memory first (zero-copy for HTTP readers).
 #|             if mmap_writer is not None:

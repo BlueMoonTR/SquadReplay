@@ -195,37 +195,84 @@ def scan_source(path: str, source: str, variant: str) -> list[Finding]:
     return out
 
 
+# One-file variants (``squadreplay-agent-<variant>.py``) carry their modules
+# as ``#|`` comment lines -- the same format agent/bundle_bootstrap reads at
+# run time, parsed here again so this file stays standalone (it ships next
+# to the variants for operators to run).
+_BUNDLE_MARK = "#| ===== "     # a module starts at a line BEGINNING with this
+_BUNDLE_PREFIX = "#| "
+
+
+def is_bundle(text: str) -> bool:
+    """Whether ``text`` is a one-file variant (has embedded modules)."""
+    return any(line.startswith(_BUNDLE_MARK) for line in text.splitlines())
+
+
+def _read_bundle(text: str):
+    """``(bootstrap source, [(relpath, source)], [bad section lines])``."""
+    bootstrap: list[str] = []
+    modules: list[tuple[str, list[str]]] = []
+    bad: list[tuple[int, str]] = []
+    current = None
+    for n, raw in enumerate(text.splitlines(True), 1):
+        if not raw.startswith("#|"):
+            if not modules:
+                bootstrap.append(raw)
+            continue
+        if raw.startswith(_BUNDLE_MARK):
+            head = raw[len(_BUNDLE_MARK):].rstrip("\n").rstrip(" =")
+            kind, _, name = head.partition(": ")
+            if kind not in ("module", "package") or not name:
+                bad.append((n, raw.rstrip("\n")))
+                current = None
+                continue
+            parts = name.split(".")
+            relpath = "/".join(parts + ["__init__.py"]) if kind == "package" \
+                else "/".join(parts) + ".py"
+            current = []
+            modules.append((relpath, current))
+        elif current is not None:
+            if raw.startswith(_BUNDLE_PREFIX):
+                current.append(raw[len(_BUNDLE_PREFIX):])
+            else:                            # a bare "#|" is an empty source line
+                current.append(raw[2:] if raw.strip() != "#|" else "\n")
+        elif not modules:
+            bootstrap.append(raw)
+    return "".join(bootstrap), [(r, "".join(ls)) for r, ls in modules], bad
+
+
 def scan_bundle(path, variant: str) -> list[Finding]:
     """Scan a one-file variant the way its modules will actually run.
 
     The embedded modules are stored as ``#|`` comment lines so the file stays
     valid, readable Python -- which means an AST pass over the FILE sees only
     the bootstrap and is blind to everything that matters. So this reads each
-    embedded module back out and scans it as the Python it is."""
-    import bundle_bootstrap
-    modules, _digest = bundle_bootstrap.read_embedded(str(path))
-    found: list[Finding] = []
-    for name in sorted(modules):
-        mod = modules[name]
-        found += scan_source(f"{Path(path).name}::{mod.relpath}", mod.source, variant)
-    # and the bootstrap itself, which is real code at the top of the file
-    # (a section starts at a line that BEGINS with the marker; the bootstrap
-    # also spells the marker out in its own code, mid-line)
-    head_lines = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines(True):
-        if line.startswith(bundle_bootstrap.MARK):
-            break
-        head_lines.append(line)
-    found += scan_source(f"{Path(path).name}::<bootstrap>", "".join(head_lines), variant)
+    embedded module back out and scans it as the Python it is, plus the
+    bootstrap. A damaged section line is a finding: what can't be read can't
+    be cleared."""
+    name = Path(path).name
+    bootstrap, modules, bad = _read_bundle(Path(path).read_text(encoding="utf-8"))
+    found = [Finding(name, n, "bundle", f"unreadable module section {line!r}")
+             for n, line in bad]
+    for relpath, source in sorted(modules):
+        found += scan_source(f"{name}::{relpath}", source, variant)
+    found += scan_source(f"{name}::<bootstrap>", bootstrap, variant)
     return found
 
 
 def scan_paths(paths, variant: str) -> list[Finding]:
+    """Scan files / directories. A one-file variant is scanned module by
+    module (scan_bundle) -- scanning it as plain source would only see the
+    bootstrap and pass anything."""
     found: list[Finding] = []
     for p in map(Path, paths):
         files = sorted(p.rglob("*.py")) if p.is_dir() else [p]
         for f in files:
-            found += scan_source(str(f), f.read_text(encoding="utf-8"), variant)
+            text = f.read_text(encoding="utf-8")
+            if is_bundle(text):
+                found += scan_bundle(f, variant)
+            else:
+                found += scan_source(str(f), text, variant)
     return found
 
 
