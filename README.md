@@ -159,6 +159,8 @@ they are computed by the same code from the same snapshots:
   voice net (local, squad, squad-leader command net, squad leader →
   commander, commander → squad) — read from the game state every tick,
   no voice recording involved
+  — and, for squad leaders, the objective points their squad scored while
+  they led it (credited tick by tick to whoever was SL at the time)
 - `kill_event` — every kill: killer, victim, weapon, distance, vehicles
 - `vehicle_session` — who sat in which vehicle seat, for how long
 

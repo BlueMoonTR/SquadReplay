@@ -23,9 +23,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.85.2'
-_BUILT_FROM = '039274017539'
-_SECTION_SHA256 = 'e5977c14d4df780b2fb114b7400d6ba98806024e5522ee41108feed0ef5f2e32'
+_VERSION = '0.85.3'
+_BUILT_FROM = '4d10f3ab5673'
+_SECTION_SHA256 = '5cb5119f312ab53557fe10ea948117ee7849e8641da896b08e2c380ff37f8de9'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -1330,7 +1330,7 @@ if __name__ == "__main__":
 #| from typing import Any
 #|
 #| DEFAULT_FILENAME = "player-stats.sqlite"
-#| SCHEMA_VERSION = 2   # 2: voice_*_s
+#| SCHEMA_VERSION = 3   # 2: voice_*_s, 3: sl_squad_objective
 #|
 #| # Column order of each table after its match_id -- the same order as
 #| MATCH_PLAYER = (
@@ -1390,6 +1390,8 @@ if __name__ == "__main__":
 #|     ("voice_command_s", "INTEGER"),
 #|     ("voice_to_commander_s", "INTEGER"),
 #|     ("voice_commander_to_squad_s", "INTEGER"),
+#|     # Manga Bayrak Puanı: squad objective points while he was its SL
+#|     ("sl_squad_objective", "REAL"),
 #| )
 #|
 #| KILL_EVENT = (
@@ -2934,7 +2936,7 @@ if __name__ == "__main__":
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #|
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.85.2"
+#| AGENT_VERSION = "0.85.3"
 #|
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
