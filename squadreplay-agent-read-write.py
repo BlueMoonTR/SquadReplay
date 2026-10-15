@@ -23,9 +23,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.85.1'
-_BUILT_FROM = '858d263d1ef2+modified'
-_SECTION_SHA256 = 'b78f553fa96b3906c3682598c22991c050f76ea0445a1212b685acd217ec7afe'
+_VERSION = '0.85.2'
+_BUILT_FROM = '039274017539'
+_SECTION_SHA256 = 'e5977c14d4df780b2fb114b7400d6ba98806024e5522ee41108feed0ef5f2e32'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -1330,7 +1330,7 @@ if __name__ == "__main__":
 #| from typing import Any
 #|
 #| DEFAULT_FILENAME = "player-stats.sqlite"
-#| SCHEMA_VERSION = 1
+#| SCHEMA_VERSION = 2   # 2: voice_*_s
 #|
 #| # Column order of each table after its match_id -- the same order as
 #| MATCH_PLAYER = (
@@ -1384,6 +1384,12 @@ if __name__ == "__main__":
 #|     ("defenses", "INTEGER"),
 #|     ("time_admin_cam_s", "INTEGER"),
 #|     ("time_in_squad_s", "INTEGER"),
+#|     # seconds transmitting per voice net (NULL: the reader didn't report it)
+#|     ("voice_local_s", "INTEGER"),
+#|     ("voice_squad_s", "INTEGER"),
+#|     ("voice_command_s", "INTEGER"),
+#|     ("voice_to_commander_s", "INTEGER"),
+#|     ("voice_commander_to_squad_s", "INTEGER"),
 #| )
 #|
 #| KILL_EVENT = (
@@ -1500,11 +1506,22 @@ if __name__ == "__main__":
 #|     conn.execute("PRAGMA busy_timeout=5000")
 #|     with conn:
 #|         conn.executescript(SCHEMA)
+#|         _add_missing_columns(conn, "match_player", MATCH_PLAYER)
+#|         _add_missing_columns(conn, "kill_event", KILL_EVENT)
+#|         _add_missing_columns(conn, "vehicle_session", VEHICLE_SESSION)
 #|         conn.execute(
 #|             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
 #|             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 #|             (str(SCHEMA_VERSION),))
 #|     return conn
+#|
+#| def _add_missing_columns(conn: sqlite3.Connection, table: str, spec) -> None:
+#|     """Bring a file made by an older agent up to this schema: CREATE TABLE"""
+#|     have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+#|     for name, typ in spec:
+#|         if name not in have:
+#|             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} "
+#|                          f"{typ.replace(' NOT NULL', '')}")
 #|
 #| def _insert_sql(table: str, spec) -> str:
 #|     names = ["match_id"] + [n for n, _ in spec]
@@ -1578,13 +1595,13 @@ if __name__ == "__main__":
 #|                     (p["eos_id"], None if steam is None else str(steam),
 #|                      p["last_name"], p["clan_tag"], started_at, started_at))
 #|             conn.executemany(_MP_SQL, [
-#|                 (match_id,) + tuple(r[n] for n, _ in MATCH_PLAYER)
+#|                 (match_id,) + tuple(r.get(n) for n, _ in MATCH_PLAYER)
 #|                 for r in result["match_players"]])
 #|             conn.executemany(_KE_SQL, [
-#|                 (match_id,) + tuple(r[n] for n, _ in KILL_EVENT)
+#|                 (match_id,) + tuple(r.get(n) for n, _ in KILL_EVENT)
 #|                 for r in result["kill_events"]])
 #|             conn.executemany(_VS_SQL, [
-#|                 (match_id,) + tuple(r[n] for n, _ in VEHICLE_SESSION)
+#|                 (match_id,) + tuple(r.get(n) for n, _ in VEHICLE_SESSION)
 #|                 for r in result["vehicle_sessions"]])
 #|         if state is None:
 #|             conn.execute("DELETE FROM mirror_state")
@@ -2917,7 +2934,7 @@ if __name__ == "__main__":
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #|
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.85.1"
+#| AGENT_VERSION = "0.85.2"
 #|
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"

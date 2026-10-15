@@ -155,7 +155,10 @@ they are computed by the same code from the same snapshots:
   scores, time played / as squad leader / fireteam leader / commander / in a
   squad, distance on foot and driving, longest kill (and its weapon),
   supplies delivered, FOBs and HABs built, rallies placed, FOBs destroyed,
-  vehicle damage, captures, defenses
+  vehicle damage, captures, defenses, and seconds spent talking on each
+  voice net (local, squad, squad-leader command net, squad leader →
+  commander, commander → squad) — read from the game state every tick,
+  no voice recording involved
 - `kill_event` — every kill: killer, victim, weapon, distance, vehicles
 - `vehicle_session` — who sat in which vehicle seat, for how long
 
