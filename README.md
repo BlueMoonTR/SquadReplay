@@ -1,0 +1,184 @@
+# SquadReplay Agent
+
+The SquadReplay agent runs on a Squad dedicated server and feeds match data
+to [SquadReplay](https://squadreplay.com): replays, the live map, player
+statistics and leaderboards.
+
+This repository is where that agent is published, so that a server owner can
+read what they are about to run before they run it — what it reads, the one
+thing it can write, how it talks to the central server, and the memory
+access it needs.
+
+> **Status.** All four variants are published here as a single file each
+> (`squadreplay-agent-<variant>.py`), the concise build — code and one-line
+> summaries, with the long rationale kept in the project repository. Verify any
+> file against the shipped checker before you run it, e.g.
+> `python3 check_variant.py --variant read-voice squadreplay-agent-read-voice.py`.
+>
+> For the **voice** variants, `--install` sets up the host prerequisites: it
+> installs `python3-bpfcc` and writes a narrow sudoers rule that lets the agent
+> run the capture tap as root (it needs `CAP_BPF`/`CAP_PERFMON`), pinned to the
+> system `python3` and the exact tap path — not a general root grant. The
+> community must still be cleared for voice on the central server. Without the
+> prerequisites or the clearance the voice variant still reads and pushes; it
+> just does not capture. See [Voice](#voice) and [LEGAL.md](LEGAL.md).
+
+## Variants
+
+Each variant is a single file. Pick the one that does only what you are
+willing to allow on your server — the SquadReplay platform works with any
+of them.
+
+| Variant | Reads match data | Writes to the game | Voice |
+|---|:-:|:-:|:-:|
+| `read` | ✓ | — | — |
+| `read-write` | ✓ | queue priority | — |
+| `read-voice` | ✓ | — | ✓ |
+| `read-write-voice` | ✓ | queue priority | ✓ |
+
+- **read** is all the platform needs: replays, the live map, statistics and
+  leaderboards all come from reading.
+- **write** adds one feature and nothing else — *queue priority*, which
+  moves a priority player up Squad's own join queue by writing to that
+  queue in memory. It is the only thing any variant ever writes.
+- **voice** adds capture of players' in-game voice for positional playback
+  in the replay viewer. It is gated — see [Voice](#voice) below.
+
+### A variant is what its file contains, not a setting
+
+"Read-only" is only worth saying if it is true of the file you run. So a
+`read` variant is built **without** the write code: there is no
+`process_vm_writev`, no writable open of `/proc/<pid>/mem`, no write module
+to import. You do not have to trust a flag — you can `grep` the file. The
+same holds for voice: a non-voice variant carries no capture code at all.
+
+Every release is checked this way before it is published, and the checker
+ships alongside the variant files so you can run it yourself against a file
+you downloaded.
+
+## Install
+
+Setting up an agent has two sides: the SquadReplay operator issues you a
+one-time enrollment token, and you run the variant on your own Squad host.
+
+**1. Get an enrollment token.** Ask the SquadReplay operator for one — they run
+`ingest.provision enroll-token <your-agent-id>` on the central server. It is
+single-use and ties this host to your community.
+
+**2. Download the variant you want** (see [Which variant?](#which-variant)
+below) and the checker from this repository, e.g. `squadreplay-agent-read.py`
+and `check_variant.py`.
+
+**3. Verify the file is only what it claims**, before you run it:
+
+```sh
+python3 check_variant.py --variant read squadreplay-agent-read.py
+```
+
+Exit 0 means the file carries no capability beyond `read` — no write code, no
+voice capture. Run it for whichever variant you downloaded.
+
+**4. Install** as root (it needs to set `kernel.yama.ptrace_scope`, apply file
+capabilities, and write a restart script):
+
+```sh
+sudo python3 squadreplay-agent-read.py --install --enroll <token>
+```
+
+`--install` auto-detects the running `SquadGameServer`, chooses a deploy
+directory (default `~/BOTS/SquadReplay` of the Squad user; override with
+`--deploy-dir`), and provisions the agent with central. It is idempotent —
+safe to re-run as a repair step. A **voice** variant additionally installs
+`python3-bpfcc` and a narrow sudoers rule for the capture tap, and asks you to
+accept the data-controller responsibility ([LEGAL.md](LEGAL.md)); pass
+`--accept-legal` to accept non-interactively. Use `--force-user <user>` if
+several Squad servers run under different accounts on the host.
+
+**5. Start it.** `--install` writes `start.sh` (its own restart loop) in the
+deploy directory but does not start the agent — that is your call:
+
+```sh
+cd ~/BOTS/SquadReplay && ./start.sh
+```
+
+There is no systemd unit; run it under `screen` / `tmux`, or add a
+`cron @reboot` entry, if you want it to survive logout or reboot.
+
+### Which variant?
+
+- **`read`** — start here. Replays, the live map, statistics and leaderboards
+  all come from reading; it is all the platform needs.
+- **`read-write`** — also moves priority players up Squad's own join queue
+  (*queue priority*). That queue write is the only thing any variant writes to
+  the game.
+- **`read-voice`** — also captures in-game voice for positional playback in the
+  replay viewer. Needs `python3-bpfcc` on the host and the community cleared for
+  voice on central; read [Voice](#voice) and [LEGAL.md](LEGAL.md) first.
+- **`read-write-voice`** — both of the above.
+
+To switch later, install a different variant file over the same deploy
+directory.
+
+## What it reads
+
+On an interval the agent reads, from the running `SquadGameServer` process:
+
+- player names and clan tags, and player identifiers (Epic Online Services
+  ID; SteamID is matched on the central side over RCON),
+- positions, teams, squads, roles, health, vehicle and weapon use,
+- kill, wound and damage events, and match and player statistics,
+- in-game chat and join/leave events,
+- **voice variants only:** in-game voice chat and who is speaking.
+
+## What it writes
+
+One feature, in the `write` variants only: **queue priority**. When
+enabled, it moves specified players ahead of others in Squad's native join
+queue by writing to that queue's memory. Nothing else in any variant writes
+to your process. The `read` variants cannot do this — they are built
+without the code for it.
+
+## How it reaches your process
+
+The agent reads (and, for queue priority, writes) through
+`process_vm_readv` / `process_vm_writev`, with `/proc/<pid>/mem` as a
+fallback. It needs permission to access the game process's memory: either
+run it as the **same user** as the Squad server with
+`kernel.yama.ptrace_scope = 0`, or grant the binary `CAP_SYS_PTRACE` and
+`CAP_DAC_READ_SEARCH`. The installer sets this up and shows you what it is
+doing.
+
+## What is not in this file
+
+The Squad-specific part of the reader — the memory offsets and the
+reverse-engineering behind them — is **not** in the downloadable agent and
+is not published. It reaches the agent at runtime as a **signed, encrypted
+payload** from the central server: the agent verifies it against a public
+key built into the agent before loading it, so a compromised server cannot
+push code the agent will run. The open file is the loader: process
+discovery, the memory mechanism, install, enrolment, the network protocol,
+auto-update, logging. The wider SquadReplay product — the web dashboard,
+auth, the replay browser, RCON, the Discord bot — runs centrally, not on
+your machine, and is not here.
+
+None of that changes what happens to your process's memory, which is the
+question this repository exists to answer.
+
+## Voice
+
+The voice variants are enabled only for communities that have taken on the
+legal responsibility for recording their players' voice. **The server owner
+is the data controller** for that data under the GDPR and Turkey's KVKK:
+you must inform your players and obtain their explicit consent before voice
+is recorded. The central server serves the voice payload only to a
+community that has been cleared for it.
+
+Read **[LEGAL.md](LEGAL.md) before installing any variant** — it sets out
+these obligations and includes a player privacy-notice template.
+
+## Licence
+
+See [LICENSE](LICENSE). The source is published so you can read and audit
+it. It does not grant the right to rebuild or redistribute the agent, or to
+run it against a central server other than the one you are authorised to
+use.

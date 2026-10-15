@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.spec
+build/
+dist/
+
+# Created by running a variant locally -- not part of the published repo
+squadreplay-voice-tap.py     # the voice tap a voice variant extracts at runtime
+.env*
+logs/
+replays/
+*.log
+
+# OS / editor
+.DS_Store
+*~
+*.swp
