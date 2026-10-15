@@ -23,9 +23,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.85.3'
-_BUILT_FROM = '4d10f3ab5673'
-_SECTION_SHA256 = '5cb5119f312ab53557fe10ea948117ee7849e8641da896b08e2c380ff37f8de9'
+_VERSION = '0.85.4'
+_BUILT_FROM = '793f630323f6'
+_SECTION_SHA256 = 'ce546a9e0f4e99cf56840fd36227f1263550475e14d03f699448cb6227211eea'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -1330,7 +1330,7 @@ if __name__ == "__main__":
 #| from typing import Any
 #|
 #| DEFAULT_FILENAME = "player-stats.sqlite"
-#| SCHEMA_VERSION = 3   # 2: voice_*_s, 3: sl_squad_objective
+#| SCHEMA_VERSION = 4   # 2: voice_*_s, 3: sl_squad_objective, 4: sl_squad_breakdown
 #|
 #| # Column order of each table after its match_id -- the same order as
 #| MATCH_PLAYER = (
@@ -1392,6 +1392,8 @@ if __name__ == "__main__":
 #|     ("voice_commander_to_squad_s", "INTEGER"),
 #|     # Manga Bayrak Puanı: squad objective points while he was its SL
 #|     ("sl_squad_objective", "REAL"),
+#|     # {squad name: seconds as its SL}, JSON text
+#|     ("sl_squad_breakdown", "TEXT"),
 #| )
 #|
 #| KILL_EVENT = (
@@ -1525,6 +1527,10 @@ if __name__ == "__main__":
 #|             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} "
 #|                          f"{typ.replace(' NOT NULL', '')}")
 #|
+#| def _sql_value(v):
+#|     """Dicts (sl_squad_breakdown) are stored as JSON text."""
+#|     return json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v
+#|
 #| def _insert_sql(table: str, spec) -> str:
 #|     names = ["match_id"] + [n for n, _ in spec]
 #|     return (f"INSERT INTO {table} ({', '.join(names)}) "
@@ -1597,7 +1603,7 @@ if __name__ == "__main__":
 #|                     (p["eos_id"], None if steam is None else str(steam),
 #|                      p["last_name"], p["clan_tag"], started_at, started_at))
 #|             conn.executemany(_MP_SQL, [
-#|                 (match_id,) + tuple(r.get(n) for n, _ in MATCH_PLAYER)
+#|                 (match_id,) + tuple(_sql_value(r.get(n)) for n, _ in MATCH_PLAYER)
 #|                 for r in result["match_players"]])
 #|             conn.executemany(_KE_SQL, [
 #|                 (match_id,) + tuple(r.get(n) for n, _ in KILL_EVENT)
@@ -2936,7 +2942,7 @@ if __name__ == "__main__":
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #|
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.85.3"
+#| AGENT_VERSION = "0.85.4"
 #|
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
