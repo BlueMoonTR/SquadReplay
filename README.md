@@ -204,6 +204,13 @@ auto-update, logging. The wider SquadReplay product — the web dashboard,
 auth, the replay browser, RCON, the Discord bot — runs centrally, not on
 your machine, and is not here.
 
+Since 0.86.0 the tick itself — what one pass over the game's memory means — is
+part of that signed payload too. What stays in this file is the loop that
+drives it, and every byte that leaves your machine passes through two
+functions you can read here: `_publish` (the local statistics copy, the local
+shared-memory channel and the encrypted push to central) and `_push_position`
+(the 4 Hz position frames, through the same connection).
+
 None of that changes what happens to your process's memory, which is the
 question this repository exists to answer.
 

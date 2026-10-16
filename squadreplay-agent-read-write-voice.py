@@ -23,9 +23,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.85.4'
-_BUILT_FROM = '793f630323f6'
-_SECTION_SHA256 = 'd6fd759abc2db3d3224679c7e7fe14830923085000ab38536d573e7a3aa4d6d9'
+_VERSION = '0.86.0'
+_BUILT_FROM = '883e58799a86'
+_SECTION_SHA256 = '8563ab70302a8d0fb0d16ddb7de274122f932d93562eeb7f5530d9cbf1fb66f7'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -2434,7 +2434,7 @@ if __name__ == "__main__":
 #| from agent.signing import SignatureError, verify_manifest
 #|
 #| #: What a payload can carry. Mirrors agent/capabilities.py's capabilities.
-#| PAYLOAD_KINDS = ("read", "write", "voice")
+#| PAYLOAD_KINDS = ("read", "write", "voice", "session")
 #|
 #| #: Wire format version of the envelope itself (not of its contents).
 #| PAYLOAD_FORMAT_V = 1
@@ -2461,6 +2461,7 @@ if __name__ == "__main__":
 #|     modules: dict[str, str],
 #|     agent_min_version: str,
 #|     squad_build: str | None = None,
+#|     build_resolver: bool = False,
 #| ) -> dict[str, Any]:
 #|     """Build an UNSIGNED payload dict from ``{module name: source}``."""
 #|     if kind not in PAYLOAD_KINDS:
@@ -2476,7 +2477,7 @@ if __name__ == "__main__":
 #|             raise PayloadError(f"source for {name} is not a string")
 #|     blob = json.dumps(modules, sort_keys=True, ensure_ascii=False,
 #|                       separators=(",", ":")).encode("utf-8")
-#|     return {
+#|     payload = {
 #|         "v": PAYLOAD_FORMAT_V,
 #|         "kind": kind,
 #|         "version": version,
@@ -2484,6 +2485,9 @@ if __name__ == "__main__":
 #|         "squad_build": squad_build,
 #|         "modules_z": base64.b64encode(zlib.compress(blob, 9)).decode("ascii"),
 #|     }
+#|     if build_resolver:
+#|         payload["build_resolver"] = True
+#|     return payload
 #|
 #| def _version_tuple(v: str) -> tuple[int, ...]:
 #|     """``"0.85.1"`` -> ``(0, 85, 1)``. Unparseable parts count as 0 so a"""
@@ -2522,7 +2526,7 @@ if __name__ == "__main__":
 #|
 #|     # A build-bound payload (voice: its probe address only exists in one
 #|     want_build = payload.get("squad_build")
-#|     if want_build is not None:
+#|     if want_build is not None and payload.get("build_resolver") is not True:
 #|         if squad_build is None:
 #|             raise PayloadError("payload is build-bound but our build is unknown")
 #|         if str(want_build) != str(squad_build):
@@ -2947,7 +2951,7 @@ if __name__ == "__main__":
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #|
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.85.4"
+#| AGENT_VERSION = "0.86.0"
 #|
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
@@ -3765,6 +3769,18 @@ if __name__ == "__main__":
 #|             h.update(chunk)
 #|     return h.hexdigest()
 #|
+#| def resolve_probe_address(probe, binary, build_sha):
+#|     """Where to attach the uprobe in ``binary``, or ``None`` for "do not"."""
+#|     resolver = getattr(probe, "resolve_func_vaddr", None)
+#|     try:
+#|         if resolver is not None:
+#|             return resolver(binary)
+#|         if getattr(probe, "SQUAD_BUILD", None) == build_sha:
+#|             return probe.FUNC_VADDR
+#|     except Exception:
+#|         logger.exception("voice: probe address resolution failed")
+#|     return None
+#|
 #| def _extract_tap_from_bundle(bundle_path, dest_path):
 #|     """Materialise the embedded ``agent.voice_tap`` source to ``dest_path``."""
 #|     out, grabbing = [], False
@@ -3799,7 +3815,8 @@ if __name__ == "__main__":
 #|     import subprocess
 #|     import threading
 #|     import time
-#|     from squad_memory_reader import SquadMemoryReader, build_reader
+#|     from sq_reader import SquadMemoryReader
+#|     from sq_session import build_reader
 #|     from agent.voice_enricher import LiveRing, serve_upload
 #|     from agent.payload_client import PayloadFetchError, load_payload
 #|     from agent.updater import AGENT_VERSION
@@ -3807,21 +3824,30 @@ if __name__ == "__main__":
 #|
 #|     binary = f"/proc/{pid}/exe"
 #|     try:
-#|         # Build-scoped: central refuses the voice payload to a host on a
+#|         # The payload is bound to the build it was made for unless it says it
+#|         build_sha = _squad_build_sha(binary)
 #|         load_payload(base_url=base_url, agent_id=agent_id, agent_secret=secret,
 #|                      kind="voice", agent_version=AGENT_VERSION, have_version=0,
-#|                      squad_build=_squad_build_sha(binary))
+#|                      squad_build=build_sha)
 #|         import voice_probe  # installed by the payload loader
 #|         tap = _tap_script_path()
 #|     except (PayloadFetchError, OSError, ImportError) as exc:
 #|         logger.warning("voice capture not started: %s", exc)
 #|         return
 #|
+#|     func_vaddr = resolve_probe_address(voice_probe, binary, build_sha)
+#|     if func_vaddr is None:
+#|         logger.warning("voice capture not started: this game build (%s) does not "
+#|                        "match the probe; the function was not found exactly once",
+#|                        build_sha[:8])
+#|         return
+#|     logger.info("voice: probe address %#x for game build %s", func_vaddr, build_sha[:8])
+#|
 #|     reader = build_reader(pid)
 #|     up = VoiceUploader(base_url, agent_id, secret)
 #|     up.start()
 #|     argv = build_tap_argv("/usr/bin/python3", tap, pid=pid, binary=binary,
-#|                           sock=sock_path, func_vaddr=voice_probe.FUNC_VADDR,
+#|                           sock=sock_path, func_vaddr=func_vaddr,
 #|                           offsets=voice_probe.PACKET_OFFSETS, owner=os.getpid())
 #|
 #|     def _spawn_tap():
@@ -3842,7 +3868,8 @@ if __name__ == "__main__":
 #|                            secret=bytes.fromhex(a["secret_hex"]),
 #|                            pid=a["pid"], sock_path=a["sock_path"])
 #|         return
-#|     from squad_memory_reader import SquadMemoryReader, build_reader
+#|     from sq_reader import SquadMemoryReader
+#|     from sq_session import build_reader
 #|     from agent.voice_enricher import LiveRing, serve
 #|     reader = build_reader(a["pid"])
 #|     print(f"# voice-enricher: pid={a['pid']} match={a['match_key'] or 'follow'}",
@@ -5181,41 +5208,12 @@ if __name__ == "__main__":
 #| import sys
 #| import json
 #| import time
-#| import struct
 #| import argparse
 #| import logging
 #| import gc
 #| import logging.handlers
-#| from datetime import datetime, timezone
 #| from pathlib import Path
 #| import math
-#|
-#| # 'WaitingToStart' is a real Squad state (server loaded the map,
-#| _VALID_MATCH_STATES = {
-#|     'Staging', 'InProgress', 'WaitingPostMatch', 'EndMatch',
-#|     'LeavingMap', 'WaitingToStart', 'None', 'Unknown', '',
-#| }
-#|
-#| # Pre-match lobby states that legitimately precede 'InProgress' in
-#| _PRE_MATCH_STATES = frozenset({'Staging', 'WaitingToStart'})
-#|
-#| def _is_pre_match_state(match_state: str) -> bool:
-#|     """True for the pre-'InProgress' lobby states that should still open"""
-#|     return match_state in _PRE_MATCH_STATES
-#|
-#| def _is_garbage_gamestate(match_state: str, elapsed_raw, map_name: str = '') -> bool:
-#|     """True when the GameState pointer looks stale and this tick's"""
-#|     try:
-#|         elapsed = float(elapsed_raw or 0)
-#|     except (TypeError, ValueError):
-#|         elapsed = -1.0
-#|     if match_state not in _VALID_MATCH_STATES:
-#|         return True
-#|     if elapsed < 0:
-#|         return True
-#|     if elapsed > 86400 and 'Jensen' not in (map_name or ''):
-#|         return True
-#|     return False
 #|
 #| def _auto_load_env_files() -> None:
 #|     """Populate ``os.environ`` from ``.env.agent`` and ``.env.map_server``"""
@@ -5239,17 +5237,6 @@ if __name__ == "__main__":
 #|
 #| _auto_load_env_files()
 #|
-#| try:
-#|     # ctypes-backed `pymem` reimplementation that uses
-#|     from agent import memory_backend as pymem
-#| except ImportError:
-#|     # Generic, redacted failure text — internal module names must never
-#|     sys.stderr.write(
-#|         "ERROR: a required runtime component failed to initialize.\n"
-#|         "Make sure the project root is on PYTHONPATH.\n"
-#|     )
-#|     sys.exit(1)
-#|
 #| from proc_utils import kill_previous_instances, find_process_pid
 #| from live_data_mmap import LiveDataWriter, BodyTooLargeError, DEFAULT_CAPACITY
 #|
@@ -5268,6 +5255,14 @@ if __name__ == "__main__":
 #|         raise
 #|     _sq_reader = None
 #|     SquadMemoryReader = None  # type: ignore[assignment,misc]
+#|
+#| # The Squad tick (the ``session`` payload, layered on ``read``). Absent in the
+#| try:
+#|     import sq_session as _sq_session
+#| except ModuleNotFoundError as _exc:
+#|     if _exc.name not in ("sq_session", "sq_reader"):
+#|         raise
+#|     _sq_session = None
 #|
 #| # Optional — only used when --push is enabled.
 #| try:
@@ -5631,16 +5626,13 @@ if __name__ == "__main__":
 #|     """Give the Squad reader the loader-side pieces it cannot find itself"""
 #|     if _sq_reader is not None:
 #|         _sq_reader.bind_host(load_mod_configs=_load_mod_reader_configs)
+#|     if _sq_session is not None:
+#|         _sq_session.bind_host(agent_dir=_agent_dir())
 #|
 #| _bind_reader_host()
 #|
-#| def _ensure_squad_reader(*, base_url: str, agent_id: str,
-#|                          agent_secret: bytes) -> None:
-#|     """Make sure the Squad-specific reader is loaded."""
-#|     global _sq_reader, SquadMemoryReader
-#|     if SquadMemoryReader is not None:
-#|         return
-#|     import importlib
+#| def _fetch_payload(kind: str, *, base_url: str, agent_id: str, agent_secret: bytes) -> None:
+#|     """Fetch, verify and install signed payload ``kind``. Exits the way the"""
 #|     try:
 #|         from agent.payload_client import PayloadFetchError, load_payload
 #|         from agent.updater import AGENT_VERSION
@@ -5650,12 +5642,12 @@ if __name__ == "__main__":
 #|         sys.exit(2)
 #|     try:
 #|         load_payload(base_url=base_url, agent_id=agent_id,
-#|                      agent_secret=agent_secret, kind="read",
+#|                      agent_secret=agent_secret, kind=kind,
 #|                      agent_version=AGENT_VERSION, have_version=0)
 #|     except PayloadFetchError as exc:
-#|         logger.error("could not load the reader from central (%s). Check the "
+#|         logger.error("could not load the %s code from central (%s). Check the "
 #|                      "--push URL, agent id and secret, and that this agent is "
-#|                      "up to date.", exc)
+#|                      "up to date.", kind, exc)
 #|         # The loader itself may be what central no longer supports; one
 #|         try:
 #|             from agent import updater as _updater
@@ -5666,10 +5658,29 @@ if __name__ == "__main__":
 #|         except ImportError:
 #|             pass
 #|         sys.exit(3)
-#|     _sq_reader = importlib.import_module("sq_reader")
-#|     SquadMemoryReader = _sq_reader.SquadMemoryReader
+#|
+#| def _ensure_squad_reader(*, base_url: str, agent_id: str,
+#|                          agent_secret: bytes) -> None:
+#|     """Make sure the Squad-specific code is loaded: the reader (``read``"""
+#|     global _sq_reader, SquadMemoryReader, _sq_session
+#|     import importlib
+#|     if SquadMemoryReader is None:
+#|         _fetch_payload("read", base_url=base_url, agent_id=agent_id,
+#|                        agent_secret=agent_secret)
+#|         _sq_reader = importlib.import_module("sq_reader")
+#|         SquadMemoryReader = _sq_reader.SquadMemoryReader
+#|         logger.info("Squad reader loaded from central")
+#|     if _sq_session is None:
+#|         try:
+#|             _sq_session = importlib.import_module("sq_session")
+#|         except ModuleNotFoundError as exc:
+#|             if exc.name != "sq_session":
+#|                 raise
+#|             _fetch_payload("session", base_url=base_url, agent_id=agent_id,
+#|                            agent_secret=agent_secret)
+#|             _sq_session = importlib.import_module("sq_session")
+#|             logger.info("Squad session loaded from central")
 #|     _bind_reader_host()
-#|     logger.info("Squad reader loaded from central")
 #|
 #| def _load_mod_admin_cam_patterns() -> tuple[str, ...]:
 #|     """Convenience wrapper — returns admin_cam_patterns tuple from all enabled mods."""
@@ -5777,98 +5788,6 @@ if __name__ == "__main__":
 #|             )
 #|         time.sleep(interval)
 #|
-#| def _close_reader_pm(reader) -> None:
-#|     """No-op placeholder for the reconnect path."""
-#|
-#| # GObjects/GNames anchors this agent itself found (or confirmed), keyed by
-#| ANCHOR_CACHE_PATH = _agent_dir() / "anchor_cache.json"
-#| _ANCHOR_CACHE_MAX_ENTRIES = 8
-#| # Module-level, not per-reader: every attach builds a fresh reader, and a
-#| _last_anchor_rediscovery = 0.0
-#|
-#| def _game_binary_identity(pid: int) -> str | None:
-#|     """Identity of the executable behind ``pid`` (None if unreadable)."""
-#|     try:
-#|         st = os.stat(f"/proc/{pid}/exe")
-#|     except OSError:
-#|         return None
-#|     return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}"
-#|
-#| def _load_anchor_cache(identity: str, path: Path | None = None) -> tuple[int, int] | None:
-#|     try:
-#|         entry = json.loads((path or ANCHOR_CACHE_PATH).read_text()).get(identity)
-#|         return int(entry["gobjects"]), int(entry["gnames"])
-#|     except (OSError, ValueError, TypeError, KeyError, AttributeError):
-#|         return None
-#|
-#| def _save_anchor_cache(identity: str, gobjects: int, gnames: int,
-#|                        path: Path | None = None) -> None:
-#|     path = path or ANCHOR_CACHE_PATH
-#|     try:
-#|         data = json.loads(path.read_text())
-#|         if not isinstance(data, dict):
-#|             data = {}
-#|     except (OSError, ValueError):
-#|         data = {}
-#|     data.pop(identity, None)
-#|     data[identity] = {"gobjects": gobjects, "gnames": gnames,
-#|                       "savedAt": int(time.time())}
-#|     for old in list(data)[:-_ANCHOR_CACHE_MAX_ENTRIES]:
-#|         del data[old]
-#|     tmp = path.with_name(path.name + ".tmp")
-#|     try:
-#|         tmp.write_text(json.dumps(data, indent=1))
-#|         os.replace(tmp, path)
-#|     except OSError as e:
-#|         logger.warning("Could not save anchor cache: %s", e)
-#|
-#| def build_reader(pid: int) -> 'SquadMemoryReader':
-#|     """Attach to ``pid`` and make sure the GObjects/GNames anchors fit."""
-#|     global _last_anchor_rediscovery
-#|     logger.info("Connecting to service...")
-#|     identity = _game_binary_identity(pid)
-#|     cached = _load_anchor_cache(identity) if identity else None
-#|     current = (SquadMemoryReader.GOBJECTS_OFFSET, SquadMemoryReader.GNAMES_OFFSET)
-#|     if cached and cached != current:
-#|         SquadMemoryReader.GOBJECTS_OFFSET, SquadMemoryReader.GNAMES_OFFSET = cached
-#|         logger.info("Using GObjects/GNames anchors cached for this game build")
-#|     r = SquadMemoryReader(pid=pid)
-#|
-#|     threshold = SquadMemoryReader._ANCHOR_HEALED_THRESHOLD
-#|     healed = (r._offset_health or {}).get('healed', 0)
-#|     now = time.time()
-#|     if (healed < threshold and now - _last_anchor_rediscovery
-#|             >= SquadMemoryReader._ANCHOR_REDISCOVERY_COOLDOWN_SECONDS):
-#|         _last_anchor_rediscovery = now
-#|         logger.warning(
-#|             "Self-heal healed=%d on attach -- attempting automatic "
-#|             "GObjects/GNames anchor rediscovery", healed)
-#|         if r._rediscover_gobjects_gnames():
-#|             # Class-level anchors were just updated -- rebuild cleanly so
-#|             r = SquadMemoryReader(pid=pid)
-#|             healed = (r._offset_health or {}).get('healed', 0)
-#|             logger.warning("Anchor rediscovery applied: reader rebuilt, "
-#|                            "healed=%d", healed)
-#|
-#|     pair = (SquadMemoryReader.GOBJECTS_OFFSET, SquadMemoryReader.GNAMES_OFFSET)
-#|     if identity and healed >= threshold and pair != cached:
-#|         _save_anchor_cache(identity, *pair)
-#|     # Keep PID in the happy-path log because ops want it for
-#|     logger.info("Connected.")
-#|     logger.debug("base: %s", hex(r.base))
-#|     return r
-#|
-#| def _position_sample_ts(base_elapsed: float, slice_s: float, sample_index: int) -> float:
-#|     """ts for the (sample_index+1)-th 4Hz position-only sample within a"""
-#|     return base_elapsed + slice_s * (sample_index + 1)
-#|
-#| def _decompress_view_pitch_byte(raw_byte: int) -> float:
-#|     """Decode the pawn's compressed view-pitch byte (a uint8) into degrees,"""
-#|     degrees = raw_byte * 360.0 / 255.0
-#|     if degrees > 180.0:
-#|         degrees -= 360.0
-#|     return degrees
-#|
 #| def _extract_argv_value(flag: str) -> str | None:
 #|     """Read ``--flag value`` or ``--flag=value`` from ``sys.argv`` without"""
 #|     argv = sys.argv
@@ -5918,12 +5837,162 @@ if __name__ == "__main__":
 #|         return "unknown"
 #|     return variant_name()
 #|
-#| def _is_new_match_for_queue_priority(cur_match_id: str, last_match_id: str | None) -> bool:
-#|     """True when cur_match_id represents a genuinely new match relative"""
-#|     return bool(cur_match_id) and cur_match_id != last_match_id
+#| class _LocalChannel:
+#|     """The local half of publishing: the shared-memory sidecar the HTTP server"""
+#|
+#|     def __init__(self, output, *, use_mmap=True, capacity=DEFAULT_CAPACITY):
+#|         self.output = Path(output)
+#|         self.capacity = capacity
+#|         self._writer = None
+#|         if use_mmap:
+#|             try:
+#|                 self._writer = LiveDataWriter(self.output.with_suffix('.mmap'),
+#|                                               capacity=capacity)
+#|                 logger.info("Data channel ready (capacity=%d bytes)", capacity)
+#|             except OSError as e:
+#|                 logger.warning("Data channel unavailable (%s) — using file fallback", e)
+#|
+#|     def write(self, text: str) -> None:
+#|         body = text.encode('utf-8')
+#|         if self._writer is not None:
+#|             try:
+#|                 self._writer.write(body)
+#|             except BodyTooLargeError:
+#|                 # Auto-grow the mmap if the snapshot outgrew its capacity.
+#|                 new_capacity = max(self.capacity * 2, len(body) + 1_000_000)
+#|                 logger.info(
+#|                     "mmap capacity %d too small for %d-byte snapshot — "
+#|                     "recreating at %d bytes", self.capacity, len(body), new_capacity,
+#|                 )
+#|                 self._writer.close()
+#|                 mmap_path = self.output.with_suffix('.mmap')
+#|                 try:                        # wipe the stale file so the fresh header is unambiguous
+#|                     mmap_path.unlink()
+#|                 except OSError:
+#|                     pass
+#|                 self.capacity = new_capacity
+#|                 self._writer = LiveDataWriter(mmap_path, capacity=new_capacity)
+#|                 self._writer.write(body)
+#|             except OSError as e:
+#|                 logger.warning("Data channel write failed: %s — disabling", e)
+#|                 try:
+#|                     self._writer.close()
+#|                 except OSError:
+#|                     pass
+#|                 self._writer = None
+#|         with open(self.output, 'w', encoding='utf-8') as f:
+#|             f.write(text)
+#|
+#| # Consecutive full-snapshot push failures. Escalates log severity so a
+#| _push_consec_fail = 0
+#|
+#| def _publish(snapshot, *, pusher, mirror, channel, offset_health) -> bool:
+#|     """The one place a tick's snapshot leaves the process: the local player-stats"""
+#|     global _push_consec_fail
+#|     # Sanitize once; every output reuses the same text.
+#|     sanitized = sanitize_nan(snapshot)
+#|     compact = json.dumps(sanitized, ensure_ascii=False)
+#|     # Whatever the mirror does, the bytes pushed to central are already fixed.
+#|     if mirror is not None:
+#|         mirror.observe(sanitized)                        # never raises
+#|     if channel is not None:
+#|         try:
+#|             channel.write(compact)
+#|         except OSError as e:
+#|             logger.warning("local snapshot write failed: %s", e)
+#|     if pusher is None:
+#|         return True
+#|     pusher._offset_health = offset_health
+#|     try:
+#|         ok = pusher.push(compact.encode('utf-8'))
+#|     except Exception:
+#|         ok = False
+#|         logger.exception("ingest push raised")           # never let a push bug stop memory reads
+#|     if ok:
+#|         if _push_consec_fail > 0:
+#|             logger.info("ingest push recovered after %d consecutive failure(s)",
+#|                         _push_consec_fail)
+#|         _push_consec_fail = 0
+#|     else:
+#|         _push_consec_fail += 1
+#|         # First, third, then every 10th failure logged loud: neither silence
+#|         if _push_consec_fail in (1, 3) or _push_consec_fail % 10 == 0:
+#|             logger.warning("ingest push failing (%d consecutive)", _push_consec_fail)
+#|     return ok
+#|
+#| def _push_position(pusher, frame_json: str, offset_health) -> None:
+#|     """Ship one 4 Hz position-only frame to central through the same pusher."""
+#|     pusher._offset_health = offset_health
+#|     try:
+#|         pusher.push(frame_json.encode('utf-8'))
+#|     except Exception:
+#|         logger.exception("position-sample push raised")
+#|
+#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep) -> None:
+#|     """The open loop. ``session.tick()`` (the closed Squad tick) returns a"""
+#|     while True:
+#|         try:
+#|             tick = session.tick()
+#|             if tick.reattach:
+#|                 # Finding the game process is ours; building the reader is the session's.
+#|                 try:
+#|                     session.attach(find_pid())
+#|                 except Exception:
+#|                     logger.exception("re-attach failed")
+#|                     sleep(session.interval)
+#|                     continue
+#|                 sleep(tick.sleep_s)
+#|                 continue
+#|             if tick.snapshot is None:
+#|                 sleep(tick.sleep_s)
+#|                 continue
+#|             try:
+#|                 _publish(tick.snapshot, pusher=pusher, mirror=mirror, channel=channel,
+#|                          offset_health=session.offset_health)
+#|             except Exception:
+#|                 logger.exception("publish failed")
+#|             cycle_dur = time.time() - tick.cycle_start
+#|             logger.info(tick.summary.format(cycle=cycle_dur))
+#|             wait = max(0.1, tick.interval_s - cycle_dur)
+#|             if tick.sample_positions and pusher is not None:
+#|                 for frame_json in session.idle(wait, tick.base_elapsed):
+#|                     _push_position(pusher, frame_json, session.offset_health)
+#|             else:
+#|                 sleep(wait)
+#|         except KeyboardInterrupt:
+#|             logger.info("Stopped by user (KeyboardInterrupt).")
+#|             break
+#|
+#| class _QueueHook:
+#|     """Queue priority rides the session: it acts before each read, annotates the"""
+#|
+#|     def __init__(self, enforcer):
+#|         self.enforcer = enforcer
+#|
+#|     def before(self, is_new_match: bool) -> None:
+#|         try:
+#|             self.enforcer.enforce(is_new_match=is_new_match)
+#|         except Exception:
+#|             logger.exception('queue_priority enforce failed')
+#|
+#|     def after(self, snapshot: dict) -> None:
+#|         # The enforcer lives in THIS process; the server is separate, so the
+#|         try:
+#|             snapshot['queuePriority'] = self.enforcer.status()
+#|         except Exception:
+#|             pass
+#|
+#|     def on_attach(self, reader) -> None:
+#|         try:
+#|             self.enforcer.attach_reader(reader)
+#|         except Exception:
+#|             logger.exception("queue_priority attach_reader failed")
+#|         try:
+#|             reader._queue_enforcer = self.enforcer       # the admin status endpoint reads it
+#|         except (AttributeError, TypeError):
+#|             logger.exception("queue_priority enforcer rebind failed")
 #|
 #| def main():
-#|
 #|     # Self-install bootstrap. When ``--install`` is on argv we act as a
 #|     if "--install" in sys.argv:
 #|         # Minimal stderr logging so the operator can see progress.
@@ -5978,25 +6047,6 @@ if __name__ == "__main__":
 #|                              'legacy mode, 1 in agent/--push mode for '
 #|                              'tighter UI refresh)')
 #|     parser.add_argument('--output', type=str, default='squad_live_data.json', help='Output JSON file')
-#|     parser.add_argument('--once', action='store_true', help='Run once and exit')
-#|     parser.add_argument('--pretty', action='store_true', help='Pretty-print JSON')
-#|     parser.add_argument('--replay-dir', type=str, default='replays', help='Directory for replay files')
-#|     parser.add_argument('--replay-max-files', type=int, default=30,
-#|                         metavar='N',
-#|                         help='Keep at most N replay files per server '
-#|                              '(oldest deleted first; .sqrx + .ndjson '
-#|                              'both swept). Default 30 — adjust upward '
-#|                              'for archival operators or pass 0 to '
-#|                              'disable the cap entirely. Local-mode '
-#|                              'mirror of the central --replay-max-files '
-#|                              'flag, applied at fresh-file creation '
-#|                              '(never on resume, never on the actively '
-#|                              'recording file).')
-#|     parser.add_argument('--replay-max-age-days', type=float, default=None,
-#|                         metavar='DAYS',
-#|                         help='Delete replay files older than DAYS. No '
-#|                              'cutoff by default. Combined with '
-#|                              '--replay-max-files (both rules applied).')
 #|     parser.add_argument('--log-level', type=str, default='INFO',
 #|                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
 #|                         help='Logging verbosity (default: INFO)')
@@ -6070,8 +6120,8 @@ if __name__ == "__main__":
 #|                         help='Skip the startup orphan-reader kill. Implied '
 #|                              'by --pid. Use when intentionally running more '
 #|                              'than one reader instance side by side '
-#|                              '(e.g. prod + test) with different --output / '
-#|                              '--replay-dir paths.')
+#|                              '(e.g. prod + test) with different --output '
+#|                              'paths.')
 #|     parser.add_argument('--config', type=str, default=None,
 #|                         help='Path to squad_replay_config.json. Controls '
 #|                              'executable_path, process_name, and '
@@ -6114,12 +6164,6 @@ if __name__ == "__main__":
 #|     # Interval default is mode-sensitive: push/agent mode wants tighter
 #|     if args.interval is None:
 #|         args.interval = 1 if args.push else 5
-#|
-#|     # Process-start timestamp — wall-clock, captured as early in main() as
-#|     control_process_start_ts = time.time()
-#|
-#|     # Last successful offset-bundle fetch (agent mode only — see the
-#|     control_last_offset_fetch_ts: float | None = None
 #|
 #|     # --push validation — fail fast before we connect to the game process
 #|     pusher: IngestPusher | None = None
@@ -6176,13 +6220,8 @@ if __name__ == "__main__":
 #|         if killed:
 #|             logger.info("Cleaned up %d orphan instance(s)", killed)
 #|
-#|     # Ensure replay directory exists — but only in local-recording mode.
-#|     replay_dir = Path(args.replay_dir)
-#|     if args.push is None:
-#|         replay_dir.mkdir(parents=True, exist_ok=True)
-#|
 #|     # Runtime offset fetch: when --push is active (agent mode), central
-#|     if SquadMemoryReader is None:
+#|     if SquadMemoryReader is None or _sq_session is None:
 #|         if pusher is None:
 #|             logger.error("The Squad reader is not part of this file, and it "
 #|                          "can only be fetched in agent mode (--push).")
@@ -6259,7 +6298,6 @@ if __name__ == "__main__":
 #|             if _agent_can_write():
 #|                 logger.warning("queue_priority module unavailable for offset "
 #|                                "patch: %s", exc)
-#|         control_last_offset_fetch_ts = time.time()
 #|         logger.info(
 #|             "Configuration applied (%d entries) — service ready",
 #|             len(applied),
@@ -6301,9 +6339,13 @@ if __name__ == "__main__":
 #|     except ImportError:
 #|         logger.info("SquadReplay binary version: (agent.updater unavailable)")
 #|
+#|     session = _sq_session.Session(
+#|         interval=args.interval,
+#|         allow_reattach=args.pid is None,    # an explicit --pid never re-discovers
+#|         is_pid_alive=_is_pid_alive,
+#|     )
 #|     if args.pid is not None:
 #|         logger.info("Connecting to service (explicit)...")
-#|         reader = build_reader(args.pid)
 #|         current_pid = args.pid
 #|     else:
 #|         logger.info(
@@ -6311,7 +6353,7 @@ if __name__ == "__main__":
 #|             reader_config.get("attach_retry_seconds", 5),
 #|         )
 #|         current_pid = wait_for_squad_pid(reader_config)
-#|         reader = build_reader(current_pid)
+#|     session.attach(current_pid)
 #|
 #|     # A voice variant also captures in-game voice: it loads the signed voice
 #|     try:
@@ -6339,16 +6381,8 @@ if __name__ == "__main__":
 #|         logger.exception("voice: auto-start failed (non-fatal)")
 #|
 #|     # Shared-memory channel: readers (HTTP server) mmap this file, so every
-#|     mmap_writer: LiveDataWriter | None = None
-#|     mmap_capacity = args.mmap_capacity
-#|     if not args.no_mmap:
-#|         mmap_path = Path(args.output).with_suffix('.mmap')
-#|         try:
-#|             mmap_writer = LiveDataWriter(mmap_path, capacity=mmap_capacity)
-#|             logger.info("Data channel ready (capacity=%d bytes)", mmap_capacity)
-#|         except OSError as e:
-#|             logger.warning("Data channel unavailable (%s) — using file fallback", e)
-#|             mmap_writer = None
+#|     channel = _LocalChannel(args.output, use_mmap=not args.no_mmap,
+#|                             capacity=args.mmap_capacity)
 #|
 #|     # Local player-stats.sqlite: every snapshot pushed below is also folded
 #|     local_mirror = None
@@ -6358,659 +6392,29 @@ if __name__ == "__main__":
 #|         import atexit
 #|         atexit.register(local_mirror.close)
 #|
-#|     last_match_state = ''
-#|     leaving_map_count = 0
-#|     none_state_count = 0
+#|     # Tune the cyclic GC for the reader's allocation workload. Each tick
+#|     gc.set_threshold(70000, 100, 100)
 #|
-#|     # Lifetime re-attach counter for this process run (not reset on a
-#|     control_reattach_count = 0
-#|
-#|     # Optional queue-priority enforcer plugin. In agent mode (--push) it
-#|     queue_enforcer = None
+#|     # Optional queue-priority enforcer. In agent mode (--push) it fetches
 #|     if not _agent_can_write():
 #|         logger.info("Read-only agent: queue priority is not part of this "
 #|                     "build; nothing here writes to the game process.")
 #|     else:
 #|         try:
 #|             from queue_priority import QueuePriority
-#|             queue_enforcer = QueuePriority(
-#|                 reader,
+#|             enforcer = QueuePriority(
+#|                 session.reader,
 #|                 push_url=(args.push if pusher is not None else None),
 #|                 agent_id=(args.agent_id if pusher is not None else None),
 #|                 agent_secret=(pusher.secret if pusher is not None else None),
 #|             )
-#|             # Expose to admin endpoint for status reads.
-#|             reader._queue_enforcer = queue_enforcer
+#|             session.reader._queue_enforcer = enforcer     # admin status endpoint
+#|             session.add_hook(_QueueHook(enforcer))
 #|         except Exception as _e:
 #|             logger.warning("queue_priority plugin unavailable: %s", _e)
-#|             queue_enforcer = None
 #|
-#|     def _rebind_per_process_state(new_reader):
-#|         """Called after every re-attach so per-process auxiliary state"""
-#|         nonlocal control_reattach_count
-#|         control_reattach_count += 1
-#|         if queue_enforcer is not None:
-#|             try:
-#|                 queue_enforcer.attach_reader(new_reader)
-#|             except Exception:
-#|                 logger.exception("queue_priority attach_reader failed")
-#|         # Re-expose the updated reference on the new reader so the
-#|         try:
-#|             new_reader._queue_enforcer = queue_enforcer
-#|         except (AttributeError, TypeError):
-#|             logger.exception("queue_priority enforcer rebind failed")
-#|
-#|     # Rate-limited counters for transient memory-read failures. A MemoryReadError
-#|     mem_err_count = 0
-#|     mem_err_window_start = time.time()
-#|     MEM_ERR_SUMMARY_INTERVAL = 3600.0  # seconds
-#|
-#|     # Consecutive-failure tracker for process-death detection. If the target
-#|     consec_read_err = 0
-#|     CONSEC_READ_ERR_RECONNECT = 3  # ~3 ticks @ interval seconds
-#|
-#|     # Persistent null-GameState watchdog. MemoryReadError-based reattach
-#|     persistent_null_gs = 0
-#|     CONSEC_NULL_GS_REATTACH = max(10, int(60 / max(args.interval, 1)))
-#|     # Consecutive ingest-push failure counter — escalates log severity
-#|     _push_consec_fail = 0
-#|
-#|     # Replay recording state
-#|     replay_file = None
-#|     replay_path = None
-#|     replay_snap_count = 0
-#|     replay_match_map = ''
-#|     # Push-mode agents never open a local replay file (central records via
-#|     last_started_match_id = None
-#|     # Queue priority's own match-transition signal — deliberately
-#|     last_qp_match_id = None
-#|     # Pre-match recording window (Staging/WaitingToStart) safety valve.
-#|     pre_match_open_since = None
-#|     REPLAY_PREMATCH_MAX_WAIT_S = 600.0  # 10 min; observed real waits are <20s on populated servers
-#|     # Tick counter for periodic gc.collect() — see comment in main loop.
-#|     main_loop_tick: int = 0
-#|
-#|     # Rules: tune the cyclic GC thresholds for the reader's allocation
-#|     gc.set_threshold(70000, 100, 100)
-#|
-#|     # Replay encryption — if SQUAD_REPLAY_KEY is in env, prefer the
-#|     _replay_key_hex = (os.environ.get('SQUAD_REPLAY_KEY') or '').strip()
-#|     _replay_key: bytes | None = None
-#|     if _replay_key_hex:
-#|         try:
-#|             _k = bytes.fromhex(_replay_key_hex)
-#|             if len(_k) == 32:
-#|                 _replay_key = _k
-#|             else:
-#|                 logger.warning("SQUAD_REPLAY_KEY must be 32 bytes, got %d; "
-#|                                "replay encryption disabled", len(_k))
-#|         except ValueError as exc:
-#|             logger.warning("SQUAD_REPLAY_KEY invalid hex (%s); replay "
-#|                            "encryption disabled", exc)
-#|
-#|     class _PlainNdjsonWriter:
-#|         """Shim around plain-text NDJSON so it mirrors ReplayWriter's"""
-#|         def __init__(self, path, append: bool = False):
-#|             self._record_idx = 0
-#|             if append:
-#|                 # Count existing lines so callers can surface a true
-#|                 try:
-#|                     with open(path, 'rb') as f:
-#|                         for _ in f:
-#|                             self._record_idx += 1
-#|                 except OSError:
-#|                     self._record_idx = 0
-#|             self._f = open(path, 'ab' if append else 'wb')
-#|         def write(self, snap_bytes: bytes) -> None:
-#|             self._f.write(snap_bytes)
-#|             self._f.write(b'\n')
-#|             self._f.flush()
-#|             self._record_idx += 1
-#|         def close(self) -> None:
-#|             if self._f is not None:
-#|                 self._f.close()
-#|                 self._f = None
-#|
-#|     def start_replay(map_name: str, game_mode: str, elapsed: int, match_id: str = '') -> None:
-#|         nonlocal replay_file, replay_path, replay_snap_count, replay_match_map
-#|         # Clear previous-match kill feed and damage events so the first
-#|         reader._damage_events.clear()
-#|         reader._take_hit_state.clear()
-#|         if hasattr(reader, '_kf_feed'):
-#|             reader._kf_feed.clear()
-#|         if hasattr(reader, '_kf_last_wounder'):
-#|             reader._kf_last_wounder.clear()
-#|             reader._kf_prev_deaths.clear()
-#|             reader._kf_world_kill_for_eos.clear()
-#|         # Push/agent mode: the central host already records the match
-#|         if pusher is not None:
-#|             return
-#|         stop_replay()
-#|         # Match-id tag in the filename lets us resume the same replay
-#|         from replay_format import (
-#|             match_tag as _match_tag,
-#|             find_resumable_replay,
-#|         )
-#|         tag = _match_tag(match_id)
-#|         # UTC, not naive local time — parse_filename() in db/import_match.py
-#|         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H%M%S')
-#|         safe_map = (map_name or 'Unknown').replace(' ', '_').replace('/', '_')
-#|         safe_mode = (game_mode or 'Unknown').replace(' ', '_').replace('/', '_')
-#|
-#|         # Resume path: find an existing in-progress file for this match
-#|         existing = find_resumable_replay(replay_dir, tag) if tag else None
-#|         target = existing
-#|         append_mode = existing is not None
-#|
-#|         if not append_mode:
-#|             # Quota sweep: enforce the per-directory cap BEFORE opening
-#|             try:
-#|                 from ingest.replay_quota import enforce_quota
-#|                 cap = args.replay_max_files if args.replay_max_files and args.replay_max_files > 0 else None
-#|                 age_cap = args.replay_max_age_days if args.replay_max_age_days and args.replay_max_age_days > 0 else None
-#|                 if cap is not None or age_cap is not None:
-#|                     sweep_cap = max(0, cap - 1) if cap is not None else None
-#|                     enforce_quota(
-#|                         replay_dir,
-#|                         max_files=sweep_cap,
-#|                         max_age_days=age_cap,
-#|                     )
-#|             except Exception:  # pragma: no cover — never block a match
-#|                 logger.exception("replay quota sweep crashed")
-#|
-#|             suffix = f"_{tag}" if tag else ""
-#|             if _replay_key is not None:
-#|                 fname = f"{ts}_{safe_map}_{safe_mode}{suffix}.sqrx"
-#|             else:
-#|                 fname = f"{ts}_{safe_map}_{safe_mode}{suffix}.ndjson"
-#|             target = replay_dir / fname
-#|
-#|         # Any open() failure (disk full, perms, path too long, sqrx
-#|         try:
-#|             if _replay_key is not None and (target.suffix == '.sqrx' if append_mode else True):
-#|                 from replay_format import ReplayWriter, ReplayFormatError
-#|                 if append_mode:
-#|                     try:
-#|                         fh = ReplayWriter.open_for_append(target, _replay_key)
-#|                     except ReplayFormatError as exc:
-#|                         # Resume failed (corrupt header / wrong key) — bail
-#|                         logger.warning(
-#|                             "Replay resume failed for %s (%s); starting fresh file",
-#|                             target, exc,
-#|                         )
-#|                         append_mode = False
-#|                         suffix = f"_{tag}" if tag else ""
-#|                         target = replay_dir / f"{ts}_{safe_map}_{safe_mode}{suffix}.sqrx"
-#|                         fh = ReplayWriter(target, _replay_key)
-#|                 else:
-#|                     fh = ReplayWriter(target, _replay_key)
-#|             else:
-#|                 # Either ndjson legacy mode, or resuming an .ndjson under
-#|                 fh = _PlainNdjsonWriter(target, append=append_mode)
-#|         except (OSError, ValueError) as exc:
-#|             logger.warning("Replay file open failed (%s): %s — disabling replay for this match", target, exc)
-#|             replay_file = None
-#|             replay_path = None
-#|             replay_snap_count = 0
-#|             replay_match_map = ''
-#|             return
-#|         replay_file = fh
-#|         replay_path = target
-#|         # Preserve the existing record count when resuming so the log
-#|         if append_mode and hasattr(fh, '_record_idx'):
-#|             replay_snap_count = getattr(fh, '_record_idx', 0)
-#|         else:
-#|             replay_snap_count = 0
-#|         replay_match_map = map_name
-#|         if append_mode:
-#|             logger.info("Recording resumed (%d existing snapshots) -> %s", replay_snap_count, replay_path)
-#|         else:
-#|             logger.info("Recording started -> %s", replay_path)
-#|
-#|     def stop_replay() -> None:
-#|         nonlocal replay_file, replay_path, replay_snap_count
-#|         if replay_file:
-#|             replay_file.close()
-#|             logger.info("Recording stopped (%d snapshots) -> %s", replay_snap_count, replay_path)
-#|             replay_file = None
-#|             replay_path = None
-#|             replay_snap_count = 0
-#|
-#|     def write_replay_snapshot(json_str: str) -> None:
-#|         nonlocal replay_snap_count
-#|         if replay_file:
-#|             replay_file.write(json_str.encode('utf-8'))
-#|             replay_snap_count += 1
-#|
-#|     def push_position_sample(json_str: str) -> None:
-#|         """Ship one 4Hz position-only sample to central over the same"""
-#|         assert pusher is not None
-#|         pusher._offset_health = reader._offset_health
-#|         try:
-#|             pusher.push(json_str.encode('utf-8'))
-#|         except Exception:
-#|             logger.exception("position-sample push raised")
-#|
-#|     def sleep_with_position_sampling(total_sleep: float, base_elapsed: float) -> None:
-#|         """Subdivide the tick's sleep into 4 slices; after each of the"""
-#|         sink = push_position_sample if pusher is not None else write_replay_snapshot
-#|         slice_s = total_sleep / 4
-#|         for i in range(3):
-#|             time.sleep(slice_s)
-#|             if not replay_file and pusher is None:
-#|                 continue  # recording stopped mid-wait (e.g. match ended)
-#|             try:
-#|                 frame = reader._sample_positions(
-#|                     _position_sample_ts(base_elapsed, slice_s, i))
-#|             except (pymem.exception.MemoryReadError, struct.error, OSError,
-#|                     AttributeError, ValueError, TypeError):
-#|                 continue
-#|             if frame['p'] or frame['v']:
-#|                 sink(json.dumps(
-#|                     frame, ensure_ascii=False, separators=(',', ':')))
-#|         time.sleep(max(0.0, total_sleep - slice_s * 3))
-#|
-#|     while True:
-#|         try:
-#|             cycle_start = time.time()
-#|             data = reader.read_all()
-#|             gi = data['gameInfo']
-#|             match_state = gi['matchState']
-#|             _elapsed_raw = gi.get('elapsedTime', 0) or 0
-#|
-#|             # Garbage GameState detection — see _is_garbage_gamestate()
-#|             if _is_garbage_gamestate(match_state, _elapsed_raw, gi.get('mapName', '')):
-#|                 logger.warning(
-#|                     "Garbage GameState detected (matchState=%r, elapsed=%s) "
-#|                     "— stale pointer; forcing rescan + skipping this tick.",
-#|                     match_state, _elapsed_raw,
-#|                 )
-#|                 reader.game_state = reader._find_game_state_instance()
-#|                 reader.persistent_level_ptr = None
-#|                 reader.logist_collector_ptr = None
-#|                 reader.combat_collector_ptr = None
-#|                 reader.obj_collector_ptr = None
-#|                 reader._raas_lane_instance = None
-#|                 reader._raas_lane_searched = False
-#|                 reader._marker_mgr_ptr = None
-#|                 reader._marker_mgr_searched = False
-#|                 persistent_null_gs += 1
-#|                 if (persistent_null_gs >= CONSEC_NULL_GS_REATTACH
-#|                         and args.pid is None):
-#|                     logger.warning(
-#|                         "GameState garbage for %d ticks — dropping attach "
-#|                         "and re-discovering PID.",
-#|                         persistent_null_gs,
-#|                     )
-#|                     stop_replay()
-#|                     persistent_null_gs = 0
-#|                     consec_read_err = 0
-#|                     current_pid = wait_for_squad_pid(reader_config)
-#|                     reader = build_reader(current_pid)
-#|                     _rebind_per_process_state(reader)
-#|                 # Don't publish this tick — snapshot is full of garbage
-#|                 time.sleep(args.interval)
-#|                 continue
-#|
-#|             # Queue priority's match-transition signal, computed every
-#|             cur_qp_match_id = gi.get('matchId', '') or ''
-#|             qp_is_new_match = _is_new_match_for_queue_priority(
-#|                 cur_qp_match_id, last_qp_match_id)
-#|             if cur_qp_match_id:
-#|                 last_qp_match_id = cur_qp_match_id
-#|
-#|             # Queue priority enforcement (file-config driven, no-op if
-#|             if queue_enforcer is not None:
-#|                 try:
-#|                     queue_enforcer.enforce(is_new_match=qp_is_new_match)
-#|                 except Exception:
-#|                     logger.exception('queue_priority enforce failed')
-#|
-#|             # Manager remote-control poll (restart / fetch_logs). Internally
-#|
-#|             # Refresh game_state pointer on map transitions.
-#|             if last_match_state == 'LeavingMap' and match_state != 'LeavingMap':
-#|                 logger.info("Session transition detected (%s -> %s), refreshing service state...", last_match_state, match_state)
-#|                 reader.game_state = reader._find_game_state_instance()
-#|                 # New GameState means new PersistentLevel → invalidate cache
-#|                 reader.persistent_level_ptr = None
-#|                 # The stats-collector singleton gets re-allocated on
-#|                 reader.logist_collector_ptr = None
-#|                 reader.combat_collector_ptr = None
-#|                 reader.obj_collector_ptr = None
-#|                 # RAAS lane initializer: per-map singleton. Negative-cache
-#|                 reader._raas_lane_instance = None
-#|                 reader._raas_lane_searched = False
-#|                 # Sticky placer cache: actor pointers from the previous
-#|                 reader._placer_cache.clear()
-#|                 # Wipe spawner ↔ vehicle bindings — a new layer has its own
-#|                 reader._clear_match_vehicle_bindings()
-#|                 # Wipe FName + class caches at every map boundary. The
-#|                 fname_dropped = len(reader.fname_cache)
-#|                 class_dropped = len(reader.class_cache)
-#|                 reader.fname_cache.clear()
-#|                 reader.class_cache.clear()
-#|                 logger.info(
-#|                     "Maintenance: %d entries cleared",
-#|                     fname_dropped + class_dropped,
-#|                 )
-#|                 logger.info("Service refreshed.")
-#|                 leaving_map_count = 0
-#|                 none_state_count = 0
-#|             elif match_state == 'LeavingMap':
-#|                 leaving_map_count += 1
-#|                 none_state_count = 0
-#|                 # Re-scan on the very FIRST LeavingMap tick (count==1) AND
-#|                 if leaving_map_count == 1 or leaving_map_count % 5 == 0:
-#|                     logger.warning("Still in transition (%d ticks), re-checking...", leaving_map_count)
-#|                     new_gs = reader._find_game_state_instance()
-#|                     if new_gs and new_gs != reader.game_state:
-#|                         logger.info("Session anchor changed during transition: %s -> %s",
-#|                                     hex(reader.game_state) if reader.game_state else 'None',
-#|                                     hex(new_gs))
-#|                     reader.game_state = new_gs
-#|                     # Force re-find of the supply collector singleton next tick.
-#|                     reader.logist_collector_ptr = None
-#|                     reader.combat_collector_ptr = None
-#|                     reader.obj_collector_ptr = None
-#|                     reader._raas_lane_instance = None
-#|                     reader._raas_lane_searched = False
-#|                     reader._marker_mgr_ptr = None
-#|                     reader._marker_mgr_searched = False
-#|             elif match_state in ('None', 'Unknown', '') and not gi.get('mapName'):
-#|                 none_state_count += 1
-#|                 leaving_map_count = 0
-#|                 if none_state_count >= 5:
-#|                     logger.warning("Stale state (%s, %d ticks), refreshing service state...", match_state, none_state_count)
-#|                     reader.game_state = reader._find_game_state_instance()
-#|                     reader.persistent_level_ptr = None
-#|                     logger.info("Service refreshed.")
-#|                     reader.logist_collector_ptr = None
-#|                     reader.combat_collector_ptr = None
-#|                     reader.obj_collector_ptr = None
-#|                     reader._raas_lane_instance = None
-#|                     reader._raas_lane_searched = False
-#|                     reader._marker_mgr_ptr = None
-#|                     reader._marker_mgr_searched = False
-#|                     # Map-scoped cache clear — this branch fires when a real
-#|                     reader._placer_cache.clear()
-#|                     reader._clear_match_vehicle_bindings()
-#|                     fname_dropped = len(reader.fname_cache)
-#|                     class_dropped = len(reader.class_cache)
-#|                     reader.fname_cache.clear()
-#|                     reader.class_cache.clear()
-#|                     logger.info(
-#|                         "Maintenance: %d entries cleared (stale-state path)",
-#|                         fname_dropped + class_dropped,
-#|                     )
-#|                     none_state_count = 0
-#|                 # Persistent null-GameState → the attached process is
-#|                 if not reader.game_state:
-#|                     persistent_null_gs += 1
-#|                 else:
-#|                     persistent_null_gs = 0
-#|             else:
-#|                 leaving_map_count = 0
-#|                 none_state_count = 0
-#|                 persistent_null_gs = 0
-#|
-#|             # Force full reattach if GameState stayed null too long.
-#|             if (persistent_null_gs >= CONSEC_NULL_GS_REATTACH
-#|                     and args.pid is None):
-#|                 logger.warning(
-#|                     "GameState has been NULL for %d ticks (~%ds) — "
-#|                     "dropping attach on PID=%s and re-discovering.",
-#|                     persistent_null_gs,
-#|                     persistent_null_gs * args.interval,
-#|                     current_pid,
-#|                 )
-#|                 stop_replay()
-#|                 persistent_null_gs = 0
-#|                 consec_read_err = 0
-#|                 current_pid = wait_for_squad_pid(reader_config)
-#|                 # Stale GObjects/GNames (a Squad update) are rediscovered
-#|                 reader = build_reader(current_pid)
-#|                 _rebind_per_process_state(reader)
-#|                 continue
-#|
-#|             # Replay recording logic. Lobby / training maps are filtered out
-#|             map_name = gi.get('mapName', '') or ''
-#|             is_skipped_map = 'Jensen' in map_name or map_name == 'Jensen\'s Training Range'
-#|             # Replay write/close decisions:
-#|             close_after_write = False
-#|             is_pre_match_state = _is_pre_match_state(match_state)
-#|             if (match_state == 'InProgress' or is_pre_match_state) and not is_skipped_map:
-#|                 cur_match_id = gi.get('matchId', '') or ''
-#|                 # Local recording: "no open file" means a new match started.
-#|                 is_new_match = (not replay_file) if pusher is None \
-#|                     else (cur_match_id != last_started_match_id)
-#|                 if is_new_match:
-#|                     start_replay(
-#|                         map_name,
-#|                         gi.get('gameMode', ''),
-#|                         gi.get('elapsedTime', 0),
-#|                         match_id=cur_match_id,
-#|                     )
-#|                     last_started_match_id = cur_match_id
-#|                     pre_match_open_since = time.time() if is_pre_match_state else None
-#|                     # read_all() already ran this tick before start_replay —
-#|                     if isinstance(data.get('killEvents'), list):
-#|                         data['killEvents'] = []
-#|                     if isinstance(data.get('damageEvents'), list):
-#|                         data['damageEvents'] = []
-#|                 elif match_state == 'InProgress' and pre_match_open_since is not None:
-#|                     # Round actually started — the pre-match safety valve
-#|                     pre_match_open_since = None
-#|                 elif is_pre_match_state and pre_match_open_since is not None:
-#|                     waited = time.time() - pre_match_open_since
-#|                     if waited > REPLAY_PREMATCH_MAX_WAIT_S:
-#|                         logger.warning(
-#|                             "Pre-match recording open %.0fs (> %.0fs cap) still "
-#|                             "in %s — abandoning (deleting) empty-lobby replay.",
-#|                             waited, REPLAY_PREMATCH_MAX_WAIT_S, match_state,
-#|                         )
-#|                         abandoned_path = replay_path
-#|                         stop_replay()
-#|                         if abandoned_path is not None:
-#|                             try:
-#|                                 Path(abandoned_path).unlink()
-#|                             except OSError as exc:
-#|                                 logger.warning(
-#|                                     "Could not delete abandoned pre-match "
-#|                                     "replay %s: %s", abandoned_path, exc,
-#|                                 )
-#|                         # Reset the dedup key so the very next tick (still
-#|                         last_started_match_id = None
-#|                         pre_match_open_since = None
-#|             elif is_skipped_map:
-#|                 if replay_file:
-#|                     stop_replay()
-#|                 pre_match_open_since = None
-#|             elif match_state in ('WaitingPostMatch', 'LeavingMap', 'EndMatch'):
-#|                 if replay_file:
-#|                     # Defer the close until after this tick's snapshot is
-#|                     close_after_write = True
-#|                 pre_match_open_since = None
-#|
-#|             last_match_state = match_state
-#|
-#|             # Surface queue-priority runtime status into the snapshot so
-#|             if queue_enforcer is not None:
-#|                 try:
-#|                     data['queuePriority'] = queue_enforcer.status()
-#|                 except Exception:
-#|                     pass
-#|
-#|             # Sanitize once; reuse for mmap, JSON, push, and replay outputs.
-#|             sanitized = sanitize_nan(data)
-#|             json_str = json.dumps(sanitized, ensure_ascii=False, indent=2 if args.pretty else None)
-#|             json_bytes = json_str.encode('utf-8')
-#|             # Compact form for push / replay (no indent); computed once.
-#|             compact_json = (
-#|                 json_str if not args.pretty
-#|                 else json.dumps(sanitized, ensure_ascii=False)
-#|             )
-#|             # After serialising: whatever the mirror does, the bytes pushed
-#|             if local_mirror is not None:
-#|                 local_mirror.observe(sanitized)   # never raises
-#|
-#|             # Publish via shared memory first (zero-copy for HTTP readers).
-#|             if mmap_writer is not None:
-#|                 try:
-#|                     mmap_writer.write(json_bytes)
-#|                 except BodyTooLargeError:
-#|                     new_capacity = max(mmap_capacity * 2, len(json_bytes) + 1_000_000)
-#|                     logger.info(
-#|                         "mmap capacity %d too small for %d-byte snapshot — "
-#|                         "recreating at %d bytes",
-#|                         mmap_capacity, len(json_bytes), new_capacity,
-#|                     )
-#|                     mmap_writer.close()
-#|                     mmap_path = Path(args.output).with_suffix('.mmap')
-#|                     # Wipe the stale file so the fresh header is unambiguous.
-#|                     try:
-#|                         mmap_path.unlink()
-#|                     except OSError:
-#|                         pass
-#|                     mmap_capacity = new_capacity
-#|                     mmap_writer = LiveDataWriter(mmap_path, capacity=mmap_capacity)
-#|                     mmap_writer.write(json_bytes)
-#|                 except OSError as e:
-#|                     logger.warning("Data channel write failed: %s — disabling", e)
-#|                     try:
-#|                         mmap_writer.close()
-#|                     except OSError:
-#|                         pass
-#|                     mmap_writer = None
-#|
-#|             # Always keep a human-readable JSON fallback on disk so external
-#|             with open(args.output, 'w', encoding='utf-8') as f:
-#|                 f.write(json_str)
-#|
-#|             # Push the compact snapshot to the central ingest server when
-#|             if pusher is not None:
-#|                 pusher._offset_health = reader._offset_health
-#|                 try:
-#|                     ok = pusher.push(compact_json.encode('utf-8'))
-#|                 except Exception:
-#|                     ok = False
-#|                     # Never let a push bug stop memory reads.
-#|                     logger.exception("ingest push raised")
-#|                 if ok:
-#|                     if _push_consec_fail > 0:
-#|                         logger.info("ingest push recovered after %d consecutive failure(s)",
-#|                                     _push_consec_fail)
-#|                     _push_consec_fail = 0
-#|                 else:
-#|                     _push_consec_fail += 1
-#|                     # First, third, then every 10th failure logged loud.
-#|                     if _push_consec_fail in (1, 3) or _push_consec_fail % 10 == 0:
-#|                         logger.warning("ingest push failing (%d consecutive)",
-#|                                        _push_consec_fail)
-#|
-#|             # Write replay snapshot (compact, no indent) — reuse compact_json.
-#|             if replay_file:
-#|                 write_replay_snapshot(compact_json)
-#|             # Now safe to close the post-match replay — the EndMatch /
-#|             if close_after_write and replay_file:
-#|                 stop_replay()
-#|
-#|             elapsed = gi['elapsedTime']
-#|             tickets = ' '.join(f"T{t['id']}={t['tickets']}" for t in gi['teams'])
-#|             player_count = len(data['players'])
-#|             zone_count = len(data['captureZones'])
-#|             veh_count = len(data['vehicles'])
-#|             dep = data['deployables']
-#|             fob_count = len(dep['fobs'])
-#|             hab_count = len(dep['habs'])
-#|             emp_count = len(dep['emplacements'])
-#|             rally_count = len(dep.get('rallies', []))
-#|             ammo_count = len(dep.get('ammoCrates', []))
-#|             repair_count = len(dep.get('repairStations', []))
-#|             fort_count = len(dep.get('fortifications', []))
-#|             mine_count = len(dep.get('mines', []))
-#|             cycle_dur = time.time() - cycle_start
-#|
-#|             # Rules: `_collect_objects` allocates millions of small
-#|             main_loop_tick += 1
-#|             if main_loop_tick % 10 == 0:
-#|                 gc.collect()
-#|
-#|             rec = f" REC[{replay_snap_count}]" if replay_file else ""
-#|             logger.info(
-#|                 "%dm%02ds %s %s | P=%d Z=%d V=%d FOB=%d HAB=%d EMP=%d RAL=%d AMO=%d REP=%d FRT=%d MIN=%d | %.1fs%s",
-#|                 elapsed // 60, elapsed % 60, gi['matchState'], tickets,
-#|                 player_count, zone_count, veh_count,
-#|                 fob_count, hab_count, emp_count, rally_count,
-#|                 ammo_count, repair_count, fort_count, mine_count, cycle_dur, rec,
-#|             )
-#|
-#|             # Tracemalloc periodic dump removed v0.79.5 — see comment at
-#|
-#|             if args.once:
-#|                 sys.stdout.write(json_str + "\n")
-#|                 break
-#|
-#|             # Successful cycle — clear the process-death counter.
-#|             consec_read_err = 0
-#|
-#|             # Idle backoff during end-of-match states. Players are on the
-#|             idle_multiplier = 6 if match_state in ('WaitingPostMatch', 'EndMatch') else 1
-#|             sleep_time = max(0.1, (args.interval * idle_multiplier) - cycle_dur)
-#|             if idle_multiplier == 1 and (replay_file or pusher is not None):
-#|                 sleep_with_position_sampling(sleep_time, _elapsed_raw)
-#|             else:
-#|                 time.sleep(sleep_time)
-#|         except KeyboardInterrupt:
-#|             stop_replay()
-#|             logger.info("Stopped by user (KeyboardInterrupt).")
-#|             break
-#|         except pymem.exception.MemoryReadError as exc:
-#|             # Transient page-read failure (ERROR_PARTIAL_COPY 299 is the
-#|             mem_err_count += 1
-#|             consec_read_err += 1
-#|             now = time.time()
-#|             if now - mem_err_window_start >= MEM_ERR_SUMMARY_INTERVAL:
-#|                 logger.warning(
-#|                     "transient MemoryReadError x%d in last %.0fs (last: %s)",
-#|                     mem_err_count, now - mem_err_window_start, exc,
-#|                 )
-#|                 mem_err_count = 0
-#|                 mem_err_window_start = now
-#|             # Process-death detection: after a few consecutive failures,
-#|             if (consec_read_err >= CONSEC_READ_ERR_RECONNECT
-#|                     and args.pid is None
-#|                     and not _is_pid_alive(current_pid)):
-#|                 logger.warning(
-#|                     "Target PID=%s appears dead (server restart?) — "
-#|                     "re-discovering…", current_pid,
-#|                 )
-#|                 stop_replay()
-#|                 _close_reader_pm(reader)
-#|                 current_pid = wait_for_squad_pid(reader_config)
-#|                 reader = build_reader(current_pid)
-#|                 _rebind_per_process_state(reader)
-#|                 consec_read_err = 0
-#|                 continue
-#|             time.sleep(args.interval)
-#|         except Exception:
-#|             logger.exception("Read cycle failed")
-#|             consec_read_err += 1
-#|             if (consec_read_err >= CONSEC_READ_ERR_RECONNECT
-#|                     and args.pid is None
-#|                     and not _is_pid_alive(current_pid)):
-#|                 logger.warning(
-#|                     "Target PID=%s gone after exception — re-discovering…",
-#|                     current_pid,
-#|                 )
-#|                 stop_replay()
-#|                 _close_reader_pm(reader)
-#|                 current_pid = wait_for_squad_pid(reader_config)
-#|                 reader = build_reader(current_pid)
-#|                 _rebind_per_process_state(reader)
-#|                 consec_read_err = 0
-#|                 continue
-#|             time.sleep(args.interval)
+#|     _run_loop(session, pusher=pusher, mirror=local_mirror, channel=channel,
+#|               find_pid=lambda: wait_for_squad_pid(reader_config))
 #|
 #| def _dump_crash_log(exc: BaseException) -> str | None:
 #|     """Write a per-crash forensic log so post-mortem doesn't depend on"""
