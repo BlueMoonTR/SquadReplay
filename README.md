@@ -97,8 +97,11 @@ deploy directory but does not start the agent — that is your call:
 cd ~/BOTS/SquadReplay && ./start.sh
 ```
 
-There is no systemd unit; run it under `screen` / `tmux`, or add a
-`cron @reboot` entry, if you want it to survive logout or reboot.
+`start.sh` restarts the agent if it exits (a crash, or a self-update), and
+`--install` also adds a `@reboot` line to the agent user's crontab (marked
+`# squadreplay-autostart`) so it starts again when the host reboots. There is no
+systemd unit. Pass `--no-autostart` to `--install` to skip the crontab line, and
+run it under `screen` / `tmux` yourself instead.
 
 ### Which variant?
 

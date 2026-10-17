@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.86.0'
-_BUILT_FROM = '84c09262402a'
-_SECTION_SHA256 = '8563ab70302a8d0fb0d16ddb7de274122f932d93562eeb7f5530d9cbf1fb66f7'
+_VERSION = '0.86.1'
+_BUILT_FROM = '631fc95506e1'
+_SECTION_SHA256 = '5dda2a83c2a37966a4e5974aceb53de87fb8c5f8d4c7d8830ca9aaeade9d1eb9'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -412,7 +412,7 @@ if __name__ == "__main__":
 #|      "    sudo apt-get install util-linux"),
 #| ]
 #|
-#| def _print_success_banner(workdir: Path) -> None:
+#| def _print_success_banner(workdir: Path, started_on_boot: bool = False) -> None:
 #|     w = 50
 #|     bar = "═" * w
 #|     print()
@@ -426,9 +426,13 @@ if __name__ == "__main__":
 #|     print(f"    {_yellow('./start.sh')}")
 #|     print()
 #|     print(_dim(f"  start.sh has its own restart loop, so the agent survives"))
-#|     print(_dim(f"  crashes. It does NOT survive reboots — run a screen/tmux"))
-#|     print(_dim(f"  session (or your own cron @reboot entry) if you want it"))
-#|     print(_dim(f"  back up automatically after a reboot."))
+#|     print(_dim(f"  crashes."))
+#|     if started_on_boot:
+#|         print(_dim(f"  A cron @reboot entry (marked '# squadreplay-autostart' in"))
+#|         print(_dim(f"  the crontab) starts it again after a reboot."))
+#|     else:
+#|         print(_dim(f"  It will NOT come back after a reboot by itself — add a"))
+#|         print(_dim(f"  cron @reboot entry, or run it in screen/tmux."))
 #|     print()
 #|     print(_dim(f"  Watch logs:"))
 #|     print(_dim(f"    tail -f {workdir}/logs/agent.log"))
@@ -770,6 +774,44 @@ if __name__ == "__main__":
 #|     _chown_recursive(sh, user)
 #|     logger.info("wrote %s", sh)
 #|
+#| #: Marks the crontab line we own, so re-running --install replaces it rather
+#| AUTOSTART_MARKER = "# squadreplay-autostart"
+#|
+#| def _autostart_line(workdir: Path) -> str:
+#|     """The cron entry that starts the agent when the host boots. ``start.sh``"""
+#|     d = shlex.quote(str(workdir))
+#|     return f"@reboot cd {d} && ./start.sh >> logs/boot.log 2>&1 {AUTOSTART_MARKER}\n"
+#|
+#| def _merge_crontab(existing: str, line: str) -> str:
+#|     """``existing`` with our entry present exactly once (any older entry of ours"""
+#|     kept = [ln for ln in (existing or "").splitlines() if AUTOSTART_MARKER not in ln]
+#|     return "".join(ln + "\n" for ln in kept) + line
+#|
+#| def _install_autostart(user: str, workdir: Path) -> bool:
+#|     """Add the @reboot entry to ``user``'s crontab. No systemd unit is installed"""
+#|     line = _autostart_line(workdir)
+#|     if shutil.which("crontab") is None:
+#|         logger.warning("cron is not installed, so the agent will NOT come back by "
+#|                        "itself after a reboot. Add this to %s's crontab by hand:\n  %s",
+#|                        user, line.strip())
+#|         return False
+#|     try:
+#|         cur = subprocess.run(["crontab", "-u", user, "-l"], capture_output=True,
+#|                              text=True, timeout=20)
+#|         existing = cur.stdout if cur.returncode == 0 else ""   # rc 1: no crontab yet
+#|         done = subprocess.run(["crontab", "-u", user, "-"], input=_merge_crontab(existing, line),
+#|                               capture_output=True, text=True, timeout=20)
+#|     except (OSError, subprocess.SubprocessError) as exc:
+#|         logger.warning("could not update %s's crontab (%s); add by hand:\n  %s",
+#|                        user, exc, line.strip())
+#|         return False
+#|     if done.returncode != 0:
+#|         logger.warning("could not update %s's crontab (%s); add by hand:\n  %s",
+#|                        user, (done.stderr or "").strip(), line.strip())
+#|         return False
+#|     logger.info("agent will start by itself after a reboot (cron @reboot for %s)", user)
+#|     return True
+#|
 #| def _create_local_stats_db(workdir: Path, user: str) -> Path | None:
 #|     """Create ``<workdir>/player-stats.sqlite`` with its schema, owned by"""
 #|     from agent import local_db
@@ -851,6 +893,7 @@ if __name__ == "__main__":
 #|     deploy_dir: Path | None = None,
 #|     force_user: str | None = None,
 #|     accept_legal: bool = False,
+#|     autostart: bool = True,
 #| ) -> int:
 #|     """Run the full Linux self-install. Returns 0 on success or raises"""
 #|     _ensure_linux()
@@ -940,7 +983,8 @@ if __name__ == "__main__":
 #|             target_user, binary, workdir,
 #|         )
 #|
-#|     _print_success_banner(workdir)
+#|     started_on_boot = _install_autostart(target_user, workdir) if autostart else False
+#|     _print_success_banner(workdir, started_on_boot)
 #|     return 0
 #|
 #| __all__ = ["install_linux", "InstallError", "_print_error_banner"]
@@ -2956,7 +3000,7 @@ if __name__ == "__main__":
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #|
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.86.0"
+#| AGENT_VERSION = "0.86.1"
 #|
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
@@ -6020,6 +6064,7 @@ if __name__ == "__main__":
 #|                 deploy_dir=Path(deploy_dir) if deploy_dir else None,
 #|                 force_user=force_user,
 #|                 accept_legal="--accept-legal" in sys.argv,
+#|                 autostart="--no-autostart" not in sys.argv,
 #|             )
 #|         except InstallError as exc:
 #|             _print_error_banner(exc)
@@ -6090,6 +6135,9 @@ if __name__ == "__main__":
 #|                              'reader restarts so the central server does '
 #|                              'not reject stale seqs.')
 #|     # ``--install`` / ``--force-user`` / ``--deploy-dir`` are dispatched
+#|     parser.add_argument('--no-autostart', action='store_true',
+#|                         help='With --install: do not add the cron @reboot entry '
+#|                              'that starts the agent after a reboot.')
 #|     parser.add_argument('--install', action='store_true',
 #|                         help='One-shot Linux self-install (sudo required). '
 #|                              'Detects the running SquadGameServer, sets '
