@@ -11,9 +11,9 @@ access it needs.
 
 > **Status.** All four variants are published here as a single file each
 > (`squadreplay-agent-<variant>.py`), the concise build — code and one-line
-> summaries, with the long rationale kept in the project repository. Verify any
-> file against the shipped checker before you run it, e.g.
-> `python3 check_variant.py --variant read-voice squadreplay-agent-read-voice.py`.
+> summaries, with the long rationale kept in the project repository. The file is
+> plain text: read it before you run it, and `python3 <file> --bundle-info` lists
+> the modules it contains.
 >
 > For the **voice** variants, `--install` sets up the host prerequisites: it
 > installs `python3-bpfcc` and writes a narrow sudoers rule that lets the agent
@@ -66,17 +66,11 @@ one-time enrollment token, and you run the variant on your own Squad host.
 single-use and ties this host to your community.
 
 **2. Download the variant you want** (see [Which variant?](#which-variant)
-below) and the checker from this repository, e.g. `squadreplay-agent-read.py`
-and `check_variant.py`.
+below), e.g. `squadreplay-agent-read.py`. It is one file; there is nothing else
+to download.
 
-**3. Verify the file is only what it claims**, before you run it:
-
-```sh
-python3 check_variant.py --variant read squadreplay-agent-read.py
-```
-
-Exit 0 means the file carries no capability beyond `read` — no write code, no
-voice capture. Run it for whichever variant you downloaded.
+**3. Read it**, if you want to know what it does. A `read` file has no code that
+writes to the game process; the voice code is only in the `voice` variants.
 
 **4. Install** as root (it needs to set `kernel.yama.ptrace_scope`, apply file
 capabilities, and write a restart script):
