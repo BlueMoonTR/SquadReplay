@@ -12,6 +12,11 @@ nothing else.
 
 What this variant can and cannot do is a property of the code in this file,
 not of a setting: see LEGAL.md and the README in the project repository.
+
+Copyright (c) 2026 BlueMoonTR / the SquadReplay project.
+Source-available, not open source: read it, run it unmodified on your own Squad
+server. Modifying it to run, redistributing it, or extracting what the central
+server delivers to it is not permitted. See LICENSE in the project repository.
 """
 import hashlib
 import importlib
@@ -24,7 +29,7 @@ import sys
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
 _VERSION = '0.86.0'
-_BUILT_FROM = '883e58799a86'
+_BUILT_FROM = '84c09262402a'
 _SECTION_SHA256 = '8563ab70302a8d0fb0d16ddb7de274122f932d93562eeb7f5530d9cbf1fb66f7'
 # -------------------------------------------------------------------------------
 

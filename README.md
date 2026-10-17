@@ -222,7 +222,9 @@ these obligations and includes a player privacy-notice template.
 
 ## Licence
 
-See [LICENSE](LICENSE). The source is published so you can read and audit
-it. It does not grant the right to rebuild or redistribute the agent, or to
-run it against a central server other than the one you are authorised to
-use.
+See [LICENSE](LICENSE) (SquadReplay Agent Source-Available License 1.1). The
+source is published so you can read and audit it, and run it **unmodified** on
+your own Squad server. You may not run a modified copy against the SquadReplay
+central server, send it data the unmodified agent did not read from your game
+server, redistribute the agent, or extract and keep the code the central server
+delivers to a running agent. This is not an open-source license.

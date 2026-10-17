@@ -1,92 +1,121 @@
-SquadReplay Agent Source-Available License 1.0
+SquadReplay Agent Source-Available License 1.1
 
 Copyright (c) 2026 BlueMoonTR / the SquadReplay project.
 
-This repository contains the source code for the SquadReplay agent — the
-component that runs on a Squad dedicated game server, reads live match
-data from the game process's memory, and pushes it to a SquadReplay
-central server (squadreplay.com or a self-hosted equivalent). It is
-published so that anyone considering running the compiled agent binary
-on their own server can read exactly what it does before trusting it —
-including reading and writing files, network endpoints it contacts, and
-the process-memory access it requires.
+This repository contains the source code of the SquadReplay agent -- the
+program that runs on a Squad dedicated game server, reads live match data
+from the game process's memory, and sends it to a SquadReplay central server
+(squadreplay.com). It is published as single-file variants so that anyone
+considering running one on their own server can read exactly what it does
+before trusting it: which files it reads and writes, which network endpoints
+it contacts, and the process-memory access it needs.
+
+This license applies to versions 0.86.0 and later. Versions published earlier
+remain available under the terms (version 1.0) they were published with.
 
 1. Definitions
 
-"The Software" means the source code, object code, and documentation
-contained in this repository, and any portion or modification of it.
+"The Software" means the source code and documentation contained in this
+repository, and any portion or modification of it.
 
-"You" means the individual or entity exercising rights under this
+"The Central Service" means the SquadReplay central server and everything it
+provides to a running agent: the signed code modules ("payloads"), the
+configuration it serves, and the network protocol used to talk to it. The
+Central Service is NOT part of the Software and is not licensed under this
 license.
+
+"You" means the individual or entity exercising rights under this license.
 
 "Licensor" means the copyright holder named above.
 
 2. Grant of Rights
 
-Subject to the restrictions in Section 3, Licensor grants You a
-worldwide, royalty-free, non-exclusive license to:
+Subject to the restrictions in Section 3, Licensor grants You a worldwide,
+royalty-free, non-exclusive license to:
 
-  a. read, study, and audit the Software for any purpose, including
-     verifying that a compiled binary's behavior matches this source;
+  a. read, study, and audit the Software for any purpose;
 
-  b. copy, compile, and run the Software, unmodified or modified, on
-     computers You own or control, to monitor and record matches on
-     Squad game servers You operate or are authorized to administer;
+  b. copy and run the Software, UNMODIFIED, on computers You own or control,
+     to monitor and record matches on Squad game servers You operate or are
+     authorized to administer, using an enrollment issued to You by the
+     Licensor;
 
-  c. create and share patches, bug reports, and pull requests intended
-     to be merged back into this repository.
+  c. modify a private copy of the Software for the sole purpose of preparing
+     a bug report, patch, or pull request intended to be submitted to this
+     repository, provided that You do not run the modified copy against the
+     Central Service or against a game server whose operator has not agreed.
 
 3. Restrictions
 
 You may NOT, without Licensor's prior written permission:
 
-  a. offer the Software, in whole or in part, modified or unmodified,
-     to any third party as a hosted, managed, or "as-a-service"
-     product — i.e., You may not operate a competing service built on
-     the Software for others;
+  a. run a modified copy of the Software (other than as permitted in 2(c)),
+     or any other program, in place of the Software against the Central
+     Service, or use credentials issued for the Software with any program
+     other than the unmodified Software;
 
-  b. redistribute copies or forks of the Software to third parties,
-     whether for a fee or free of charge, other than through this
-     repository's own official channel;
+  b. send to the Central Service any data that was not read from the game
+     server by the unmodified Software -- including fabricated, altered or
+     replayed data, or data from a game server You do not operate;
 
-  c. remove or alter this license, the copyright notice above, or any
-     notice in the Software crediting its origin;
+  c. extract, copy, record, decompile, disassemble, reverse engineer, or
+     publish the payloads or any other material the Central Service delivers
+     to a running agent, or use it for any purpose other than letting that
+     agent run -- the fact that such material is delivered to Your machine to
+     be executed does not license You to keep, study or share it;
 
-  d. use the Software, or a derivative of it, to build a product or
-     service that is materially similar to and competes with
-     SquadReplay.
+  d. offer the Software, in whole or in part, to any third party as a hosted,
+     managed, or "as-a-service" product, or operate a service built on the
+     Software for others;
 
-Running the Software on Your own Squad server(s) to monitor Your own
-community's matches — including a community that charges its own
-players or members for access — is explicitly permitted and is not,
-by itself, "offering the Software as a service" under 3(a); that
-restriction targets reselling or re-hosting SquadReplay's own
-functionality to others, not operating a Squad game server.
+  e. redistribute copies or forks of the Software to third parties, whether
+     for a fee or free of charge, other than through this repository's own
+     official channel;
 
-4. No Warranty
+  f. remove or alter this license, the copyright notice, or any notice in the
+     Software crediting its origin;
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF,
-OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE — INCLUDING, WITHOUT LIMITATION, ANY DAMAGE TO THE GAME
+  g. use the Software, or anything derived from it or from the Central
+     Service, to build a product or service that is materially similar to and
+     competes with SquadReplay.
+
+Running the unmodified Software on Your own Squad server(s) to monitor Your
+own community's matches -- including a community that charges its own players
+or members for access -- is explicitly permitted. Restriction 3(d) targets
+reselling or re-hosting SquadReplay's functionality to others, not operating
+a Squad game server.
+
+4. Variants and Data Protection
+
+Which variant You run determines what the Software can do (read, write
+to the game process's join queue, capture voice). Running a variant is Your
+decision and Your responsibility. The voice variants record players' speech;
+read LEGAL.md before installing any variant. Nothing in this license replaces
+the obligations described there.
+
+5. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE
+CENTRAL SERVICE -- INCLUDING, WITHOUT LIMITATION, ANY DAMAGE TO THE GAME
 SERVER PROCESS OR HOST THE SOFTWARE IS RUN AGAINST.
 
-5. Termination
+6. Termination
 
-Your rights under this license terminate automatically if You breach
-any of the restrictions in Section 3. Licensor may also grant
-additional permissions, or release the Software (or any version of
-it) under a different license, at Licensor's sole discretion, without
-affecting the rights already granted under this license for versions
-already published.
+Your rights under this license terminate automatically if You breach any of
+the restrictions in Section 3, and Your access to the Central Service may be
+withdrawn. Licensor may also grant additional permissions, or release the
+Software (or any version of it) under a different license, at Licensor's sole
+discretion, without affecting the rights already granted under this license
+for versions already published.
 
-6. What This License Is Not
+7. What This License Is Not
 
-This is not the MIT, Apache, GPL, or any OSI-approved open-source
-license — it does not meet the Open Source Definition's requirement
-that a license impose no restriction on the field of use. It is a
-source-available license: the code is open to read and to run for
-Your own purposes, but not to redistribute or resell.
+This is not the MIT, Apache, GPL, or any OSI-approved open-source license --
+it does not meet the Open Source Definition's requirement that a license
+impose no restriction on the field of use. It is a source-available license:
+the code is open to read and to run unmodified for Your own purposes, but not
+to modify and use, redistribute, or resell.
