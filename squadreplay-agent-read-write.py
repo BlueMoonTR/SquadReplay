@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.86.2'
-_BUILT_FROM = '5afaab7c614e'
-_SECTION_SHA256 = 'a555ca9062e7e6030324fc8ac464698c371e762fb15a7844d199dcf1e94fc953'
+_VERSION = '0.87.0'
+_BUILT_FROM = '420b1710a628'
+_SECTION_SHA256 = 'ed66d68f97be078752805c39d44cc2f34b07b27f7433cedf2a6a1cbdd131aacb'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -1225,6 +1225,179 @@ if __name__ == "__main__":
 #| def variant_name(caps: tuple[str, ...] | None = None) -> str:
 #|     """``read`` / ``read-write`` -- the name the release files use."""
 #|     return "-".join(caps if caps is not None else detect())
+#| ===== module: agent.control_client =====
+#| """agent/control_client.py — Agent-side remote-control poll/upload client."""
+#| from __future__ import annotations
+#| import base64
+#| import json
+#| import logging
+#| import re
+#| import secrets
+#| import time
+#| import urllib.error
+#| import urllib.request
+#| from typing import Any
+#| from ingest import protocol as ingest_protocol
+#| from ingest.crypto import CryptoError, EncryptedEnvelope
+#| from ingest.offsets import open_response_envelope
+#| logger = logging.getLogger("SquadReplay")
+#| # Matches any run of 32+ lowercase-hex characters — long enough to catch
+#| _HEX_SECRET_RE = re.compile(r"(?i)\b[0-9a-f]{32,}\b")
+#| _REDACTED = "<redacted>"
+#| def redact_log_text(text: str) -> str:
+#|     """Best-effort scrub of long hex-looking runs from a log excerpt."""
+#|     if not isinstance(text, str):
+#|         return ""
+#|     return _HEX_SECRET_RE.sub(_REDACTED, text)
+#| class ControlFetchError(Exception):
+#|     """Raised when the control poll cannot be completed / verified."""
+#| def _b64url_decode(s: str) -> bytes:
+#|     if not isinstance(s, str):
+#|         raise ValueError("base64url field must be a string")
+#|     pad = "=" * (-len(s) % 4)
+#|     return base64.urlsafe_b64decode(s + pad)
+#| def fetch_control(
+#|     *,
+#|     base_url: str,
+#|     agent_id: str,
+#|     agent_secret: bytes,
+#|     timeout: float = 10.0,
+#| ) -> str | None:
+#|     """Poll central for a pending manager-queued command."""
+#|     url = base_url.rstrip("/") + "/agent/control"
+#|     seq = secrets.randbits(31)
+#|     ts = int(time.time())
+#|     req_body = ingest_protocol.encode_envelope(
+#|         agent_id=agent_id,
+#|         seq=seq,
+#|         agent_secret=agent_secret,
+#|         snapshot_json=json.dumps({"want": "control"}).encode("utf-8"),
+#|         ts=ts,
+#|     )
+#|     req = urllib.request.Request(
+#|         url,
+#|         data=req_body,
+#|         headers={
+#|             "Content-Type": "application/json",
+#|             "User-Agent":   "SquadReplay/1.0",
+#|         },
+#|         method="POST",
+#|     )
+#|     try:
+#|         with urllib.request.urlopen(req, timeout=timeout) as resp:
+#|             raw = resp.read()
+#|     except urllib.error.HTTPError as e:
+#|         raise ControlFetchError(f"HTTP {e.code} from central") from e
+#|     except (urllib.error.URLError, TimeoutError, OSError) as e:
+#|         raise ControlFetchError(f"transport error: {e}") from e
+#|     try:
+#|         doc = json.loads(raw)
+#|         nonce = _b64url_decode(doc["nonce"])
+#|         ciphertext = _b64url_decode(doc["ciphertext"])
+#|     except (json.JSONDecodeError, KeyError, ValueError) as e:
+#|         raise ControlFetchError(f"bad response shape: {e}") from e
+#|     env = EncryptedEnvelope(nonce=nonce, ciphertext=ciphertext)
+#|     try:
+#|         plaintext = open_response_envelope(
+#|             agent_secret,
+#|             env,
+#|             agent_id=agent_id,
+#|             seq=seq,
+#|             ts=ts,
+#|         )
+#|     except CryptoError as e:
+#|         raise ControlFetchError(f"response decrypt failed: {e}") from e
+#|     try:
+#|         body: dict[str, Any] = json.loads(plaintext)
+#|     except (json.JSONDecodeError, ValueError) as e:
+#|         raise ControlFetchError(f"response not json: {e}") from e
+#|     if not isinstance(body, dict):
+#|         raise ControlFetchError("response must be a json object")
+#|     command = body.get("command")
+#|     if command is None:
+#|         return None
+#|     if command not in ("restart", "fetch_logs", "diagnose"):
+#|         # Forward-compat: a future central build might send a command
+#|         logger.debug("control: unrecognised command %r — ignoring", command)
+#|         return None
+#|     return command
+#| def upload_log_result(
+#|     *,
+#|     base_url: str,
+#|     agent_id: str,
+#|     agent_secret: bytes,
+#|     log_tail: str,
+#|     truncated: bool,
+#|     timeout: float = 10.0,
+#| ) -> None:
+#|     """Best-effort upload of a redacted log tail after a ``fetch_logs``"""
+#|     url = base_url.rstrip("/") + "/agent/control/log_result"
+#|     seq = secrets.randbits(31)
+#|     ts = int(time.time())
+#|     try:
+#|         req_body = ingest_protocol.encode_envelope(
+#|             agent_id=agent_id,
+#|             seq=seq,
+#|             agent_secret=agent_secret,
+#|             snapshot_json=json.dumps({
+#|                 "log_tail": log_tail,
+#|                 "truncated": bool(truncated),
+#|             }).encode("utf-8"),
+#|             ts=ts,
+#|         )
+#|     except (TypeError, ValueError) as e:
+#|         logger.warning("control: failed to encode log_result envelope: %s", e)
+#|         return
+#|     req = urllib.request.Request(
+#|         url,
+#|         data=req_body,
+#|         headers={
+#|             "Content-Type": "application/json",
+#|             "User-Agent":   "SquadReplay/1.0",
+#|         },
+#|         method="POST",
+#|     )
+#|     try:
+#|         with urllib.request.urlopen(req, timeout=timeout) as resp:
+#|             resp.read()
+#|     except urllib.error.HTTPError as e:
+#|         logger.warning("control: log_result upload rejected: HTTP %s", e.code)
+#|     except (urllib.error.URLError, TimeoutError, OSError) as e:
+#|         logger.warning("control: log_result upload failed (transport): %s", e)
+#| CONTROL_POLL_SECONDS = 30.0
+#| LOG_TAIL_LINES = 200
+#| LOG_TAIL_BYTES = 51_200
+#| def tail_log(path):
+#|     """The last 200 lines (at most 50 KiB) of the agent's own log as ``(text, truncated)``,"""
+#|     from pathlib import Path
+#|     try:
+#|         raw = Path(path).read_text(encoding="utf-8", errors="replace")
+#|     except OSError as exc:
+#|         logger.warning("control: cannot read %s: %s", path, exc)
+#|         return None
+#|     lines = raw.splitlines()
+#|     truncated = len(lines) > LOG_TAIL_LINES
+#|     text = "\n".join(lines[-LOG_TAIL_LINES:])
+#|     if len(text.encode("utf-8")) > LOG_TAIL_BYTES:
+#|         truncated, text = True, text[-LOG_TAIL_BYTES:]
+#|     return text, truncated
+#| def run_background(*, base_url, agent_id, agent_secret, log_path, restart):
+#|     """Ask central every 30 s whether the manager queued something. ``restart`` runs once and ends"""
+#|     while True:
+#|         try:
+#|             command = fetch_control(base_url=base_url, agent_id=agent_id, agent_secret=agent_secret)
+#|         except ControlFetchError as exc:
+#|             logger.debug("control: poll failed (%s), retrying", exc)
+#|             command = None
+#|         if command == "restart":
+#|             restart()
+#|             return
+#|         if command == "fetch_logs":
+#|             tail = tail_log(log_path)
+#|             if tail is not None:
+#|                 upload_log_result(base_url=base_url, agent_id=agent_id, agent_secret=agent_secret,
+#|                                   log_tail=redact_log_text(tail[0]), truncated=tail[1])
+#|         time.sleep(CONTROL_POLL_SECONDS)
 #| ===== module: agent.local_db =====
 #| """agent/local_db.py -- the community's own copy of its match stats."""
 #| from __future__ import annotations
@@ -2584,7 +2757,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.86.2"
+#| AGENT_VERSION = "0.87.0"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -2717,7 +2890,6 @@ if __name__ == "__main__":
 #|     _swap_bundle(new_path)
 #| def _swap_bundle(new_path: Path) -> None:
 #|     """One-file agent: the new file replaces the running one (which keeps running from memory),"""
-#|     from agent import _runtime
 #|     cur = _install_root() / _current_exe_name()
 #|     bak = cur.with_suffix(".bak")
 #|     try:
@@ -2729,10 +2901,14 @@ if __name__ == "__main__":
 #|         if bak.exists() and not cur.exists():
 #|             os.replace(bak, cur)                # leave the old agent where it was
 #|         raise UpdateError(f"could not replace the agent file: {exc}") from exc
+#|     relaunch_later(cur)
+#| def relaunch_later(path: Path, delay: int = 2) -> None:
+#|     """Start the one-file agent at ``path`` again after ``delay`` seconds, from a detached shell, so the"""
+#|     from agent import _runtime
 #|     if os.environ.get("SQUAD_AGENT_SUPERVISED"):
 #|         return
 #|     try:
-#|         subprocess.Popen(["/bin/sh", "-c", 'sleep 2; exec "$@"', "sh", _runtime.interpreter(), str(cur)],
+#|         subprocess.Popen(["/bin/sh", "-c", f'sleep {int(delay)}; exec "$@"', "sh", _runtime.interpreter(), str(path)],
 #|                          close_fds=True, start_new_session=True,
 #|                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 #|     except (OSError, subprocess.SubprocessError) as exc:
@@ -3272,6 +3448,7 @@ if __name__ == "__main__":
 #| import argparse
 #| import logging
 #| import gc
+#| import signal
 #| import logging.handlers
 #| from pathlib import Path
 #| import math
@@ -3562,6 +3739,16 @@ if __name__ == "__main__":
 #|             return
 #|         self._last_error_repr = reason
 #|         logger.warning("push: %s (url=%s, seq=%d)", reason, self._url, self._seq)
+#| def _restart_agent() -> None:
+#|     """Manager asked for a restart: arrange the relaunch, then leave through the normal Ctrl-C path"""
+#|     from agent import _runtime, updater
+#|     path = _runtime.bundle_path()
+#|     if path is None:
+#|         logger.warning("control: restart requested but this is not a one-file agent; ignoring")
+#|         return
+#|     logger.info("control: restart requested by the manager")
+#|     updater.relaunch_later(path, delay=5)
+#|     os.kill(os.getpid(), signal.SIGINT)
 #| def _configure_logging(level_name: str, log_file: str | None) -> None:
 #|     level = getattr(logging, level_name.upper(), logging.INFO)
 #|     root = logging.getLogger()
@@ -4248,6 +4435,13 @@ if __name__ == "__main__":
 #|             )
 #|         except ImportError as exc:
 #|             logger.warning("updater unavailable (%s) — auto-update disabled", exc)
+#|         # The manager's Logs / Restart buttons: poll central every 30 s for a queued command.
+#|         from agent import control_client as _control
+#|         _threading.Thread(
+#|             target=_control.run_background, name='squad_agent-control', daemon=True,
+#|             kwargs=dict(base_url=args.push, agent_id=args.agent_id, agent_secret=pusher.secret,
+#|                         log_path=args.log_file, restart=_restart_agent),
+#|         ).start()
 #|     # Attach strategy:
 #|     reader_config = load_reader_config(
 #|         Path(args.config) if args.config else None

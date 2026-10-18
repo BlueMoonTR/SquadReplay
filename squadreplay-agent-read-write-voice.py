@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.86.2'
-_BUILT_FROM = '5afaab7c614e'
-_SECTION_SHA256 = 'e2d9f3b433d1bf625b62d597f7671e309a6e29d13bb85910b0bef73b9425d27e'
+_VERSION = '0.87.0'
+_BUILT_FROM = '420b1710a628'
+_SECTION_SHA256 = '0fe2c325d2da07721c92e96ab365f49d7334c4a7da03c82b6865e126198a6449'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -1229,6 +1229,179 @@ if __name__ == "__main__":
 #| def variant_name(caps: tuple[str, ...] | None = None) -> str:
 #|     """``read`` / ``read-write`` -- the name the release files use."""
 #|     return "-".join(caps if caps is not None else detect())
+#| ===== module: agent.control_client =====
+#| """agent/control_client.py — Agent-side remote-control poll/upload client."""
+#| from __future__ import annotations
+#| import base64
+#| import json
+#| import logging
+#| import re
+#| import secrets
+#| import time
+#| import urllib.error
+#| import urllib.request
+#| from typing import Any
+#| from ingest import protocol as ingest_protocol
+#| from ingest.crypto import CryptoError, EncryptedEnvelope
+#| from ingest.offsets import open_response_envelope
+#| logger = logging.getLogger("SquadReplay")
+#| # Matches any run of 32+ lowercase-hex characters — long enough to catch
+#| _HEX_SECRET_RE = re.compile(r"(?i)\b[0-9a-f]{32,}\b")
+#| _REDACTED = "<redacted>"
+#| def redact_log_text(text: str) -> str:
+#|     """Best-effort scrub of long hex-looking runs from a log excerpt."""
+#|     if not isinstance(text, str):
+#|         return ""
+#|     return _HEX_SECRET_RE.sub(_REDACTED, text)
+#| class ControlFetchError(Exception):
+#|     """Raised when the control poll cannot be completed / verified."""
+#| def _b64url_decode(s: str) -> bytes:
+#|     if not isinstance(s, str):
+#|         raise ValueError("base64url field must be a string")
+#|     pad = "=" * (-len(s) % 4)
+#|     return base64.urlsafe_b64decode(s + pad)
+#| def fetch_control(
+#|     *,
+#|     base_url: str,
+#|     agent_id: str,
+#|     agent_secret: bytes,
+#|     timeout: float = 10.0,
+#| ) -> str | None:
+#|     """Poll central for a pending manager-queued command."""
+#|     url = base_url.rstrip("/") + "/agent/control"
+#|     seq = secrets.randbits(31)
+#|     ts = int(time.time())
+#|     req_body = ingest_protocol.encode_envelope(
+#|         agent_id=agent_id,
+#|         seq=seq,
+#|         agent_secret=agent_secret,
+#|         snapshot_json=json.dumps({"want": "control"}).encode("utf-8"),
+#|         ts=ts,
+#|     )
+#|     req = urllib.request.Request(
+#|         url,
+#|         data=req_body,
+#|         headers={
+#|             "Content-Type": "application/json",
+#|             "User-Agent":   "SquadReplay/1.0",
+#|         },
+#|         method="POST",
+#|     )
+#|     try:
+#|         with urllib.request.urlopen(req, timeout=timeout) as resp:
+#|             raw = resp.read()
+#|     except urllib.error.HTTPError as e:
+#|         raise ControlFetchError(f"HTTP {e.code} from central") from e
+#|     except (urllib.error.URLError, TimeoutError, OSError) as e:
+#|         raise ControlFetchError(f"transport error: {e}") from e
+#|     try:
+#|         doc = json.loads(raw)
+#|         nonce = _b64url_decode(doc["nonce"])
+#|         ciphertext = _b64url_decode(doc["ciphertext"])
+#|     except (json.JSONDecodeError, KeyError, ValueError) as e:
+#|         raise ControlFetchError(f"bad response shape: {e}") from e
+#|     env = EncryptedEnvelope(nonce=nonce, ciphertext=ciphertext)
+#|     try:
+#|         plaintext = open_response_envelope(
+#|             agent_secret,
+#|             env,
+#|             agent_id=agent_id,
+#|             seq=seq,
+#|             ts=ts,
+#|         )
+#|     except CryptoError as e:
+#|         raise ControlFetchError(f"response decrypt failed: {e}") from e
+#|     try:
+#|         body: dict[str, Any] = json.loads(plaintext)
+#|     except (json.JSONDecodeError, ValueError) as e:
+#|         raise ControlFetchError(f"response not json: {e}") from e
+#|     if not isinstance(body, dict):
+#|         raise ControlFetchError("response must be a json object")
+#|     command = body.get("command")
+#|     if command is None:
+#|         return None
+#|     if command not in ("restart", "fetch_logs", "diagnose"):
+#|         # Forward-compat: a future central build might send a command
+#|         logger.debug("control: unrecognised command %r — ignoring", command)
+#|         return None
+#|     return command
+#| def upload_log_result(
+#|     *,
+#|     base_url: str,
+#|     agent_id: str,
+#|     agent_secret: bytes,
+#|     log_tail: str,
+#|     truncated: bool,
+#|     timeout: float = 10.0,
+#| ) -> None:
+#|     """Best-effort upload of a redacted log tail after a ``fetch_logs``"""
+#|     url = base_url.rstrip("/") + "/agent/control/log_result"
+#|     seq = secrets.randbits(31)
+#|     ts = int(time.time())
+#|     try:
+#|         req_body = ingest_protocol.encode_envelope(
+#|             agent_id=agent_id,
+#|             seq=seq,
+#|             agent_secret=agent_secret,
+#|             snapshot_json=json.dumps({
+#|                 "log_tail": log_tail,
+#|                 "truncated": bool(truncated),
+#|             }).encode("utf-8"),
+#|             ts=ts,
+#|         )
+#|     except (TypeError, ValueError) as e:
+#|         logger.warning("control: failed to encode log_result envelope: %s", e)
+#|         return
+#|     req = urllib.request.Request(
+#|         url,
+#|         data=req_body,
+#|         headers={
+#|             "Content-Type": "application/json",
+#|             "User-Agent":   "SquadReplay/1.0",
+#|         },
+#|         method="POST",
+#|     )
+#|     try:
+#|         with urllib.request.urlopen(req, timeout=timeout) as resp:
+#|             resp.read()
+#|     except urllib.error.HTTPError as e:
+#|         logger.warning("control: log_result upload rejected: HTTP %s", e.code)
+#|     except (urllib.error.URLError, TimeoutError, OSError) as e:
+#|         logger.warning("control: log_result upload failed (transport): %s", e)
+#| CONTROL_POLL_SECONDS = 30.0
+#| LOG_TAIL_LINES = 200
+#| LOG_TAIL_BYTES = 51_200
+#| def tail_log(path):
+#|     """The last 200 lines (at most 50 KiB) of the agent's own log as ``(text, truncated)``,"""
+#|     from pathlib import Path
+#|     try:
+#|         raw = Path(path).read_text(encoding="utf-8", errors="replace")
+#|     except OSError as exc:
+#|         logger.warning("control: cannot read %s: %s", path, exc)
+#|         return None
+#|     lines = raw.splitlines()
+#|     truncated = len(lines) > LOG_TAIL_LINES
+#|     text = "\n".join(lines[-LOG_TAIL_LINES:])
+#|     if len(text.encode("utf-8")) > LOG_TAIL_BYTES:
+#|         truncated, text = True, text[-LOG_TAIL_BYTES:]
+#|     return text, truncated
+#| def run_background(*, base_url, agent_id, agent_secret, log_path, restart):
+#|     """Ask central every 30 s whether the manager queued something. ``restart`` runs once and ends"""
+#|     while True:
+#|         try:
+#|             command = fetch_control(base_url=base_url, agent_id=agent_id, agent_secret=agent_secret)
+#|         except ControlFetchError as exc:
+#|             logger.debug("control: poll failed (%s), retrying", exc)
+#|             command = None
+#|         if command == "restart":
+#|             restart()
+#|             return
+#|         if command == "fetch_logs":
+#|             tail = tail_log(log_path)
+#|             if tail is not None:
+#|                 upload_log_result(base_url=base_url, agent_id=agent_id, agent_secret=agent_secret,
+#|                                   log_tail=redact_log_text(tail[0]), truncated=tail[1])
+#|         time.sleep(CONTROL_POLL_SECONDS)
 #| ===== module: agent.local_db =====
 #| """agent/local_db.py -- the community's own copy of its match stats."""
 #| from __future__ import annotations
@@ -2588,7 +2761,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.86.2"
+#| AGENT_VERSION = "0.87.0"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -2721,7 +2894,6 @@ if __name__ == "__main__":
 #|     _swap_bundle(new_path)
 #| def _swap_bundle(new_path: Path) -> None:
 #|     """One-file agent: the new file replaces the running one (which keeps running from memory),"""
-#|     from agent import _runtime
 #|     cur = _install_root() / _current_exe_name()
 #|     bak = cur.with_suffix(".bak")
 #|     try:
@@ -2733,10 +2905,14 @@ if __name__ == "__main__":
 #|         if bak.exists() and not cur.exists():
 #|             os.replace(bak, cur)                # leave the old agent where it was
 #|         raise UpdateError(f"could not replace the agent file: {exc}") from exc
+#|     relaunch_later(cur)
+#| def relaunch_later(path: Path, delay: int = 2) -> None:
+#|     """Start the one-file agent at ``path`` again after ``delay`` seconds, from a detached shell, so the"""
+#|     from agent import _runtime
 #|     if os.environ.get("SQUAD_AGENT_SUPERVISED"):
 #|         return
 #|     try:
-#|         subprocess.Popen(["/bin/sh", "-c", 'sleep 2; exec "$@"', "sh", _runtime.interpreter(), str(cur)],
+#|         subprocess.Popen(["/bin/sh", "-c", f'sleep {int(delay)}; exec "$@"', "sh", _runtime.interpreter(), str(path)],
 #|                          close_fds=True, start_new_session=True,
 #|                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 #|     except (OSError, subprocess.SubprocessError) as exc:
@@ -2926,6 +3102,8 @@ if __name__ == "__main__":
 #|         # Squad repeats a frame in later packets and sends each packet to
 #|         self._seen = collections.OrderedDict()
 #|         self._lock = threading.Lock()
+#|         # Set by stop(): the background loops end. A capture that moves on to
+#|         self._stop = threading.Event()
 #|         # Counters for the periodic status line (ops: is anything arriving?).
 #|         self.stats = {"frames": 0, "emitted": 0, "dropped": 0, "errors": 0}
 #|         if start_poll:
@@ -2944,13 +3122,16 @@ if __name__ == "__main__":
 #|             self._t0 = time.monotonic()
 #|     def _now(self) -> float:
 #|         return self._elapsed + min(max(time.monotonic() - self._t0, 0.0), 0.999)
+#|     def stop(self):
+#|         """End the background loops (the clock poll and the idle sweep)."""
+#|         self._stop.set()
 #|     def _poll_elapsed(self):
-#|         while True:
+#|         while not self._stop.is_set():
 #|             try:
 #|                 self.clock_tick(time.monotonic())
 #|             except Exception as exc:          # noqa: BLE001 -- see _guard
 #|                 self._guard("clock", exc)
-#|             time.sleep(0.1)                   # the fraction is off by at most this
+#|             self._stop.wait(0.1)              # the fraction is off by at most this
 #|     def clock_tick(self, now: float):
 #|         """Read the game clock once; when it has not moved for STALL_S,"""
 #|         self._set_elapsed(float(self.reader.read_game_info().get("elapsedTime") or 0.0))
@@ -2974,8 +3155,7 @@ if __name__ == "__main__":
 #|         self._next_find = now + self._find_every
 #|     def _sweep_loop(self):
 #|         last_status = time.monotonic()
-#|         while True:
-#|             time.sleep(SWEEP_S)
+#|         while not self._stop.wait(SWEEP_S):
 #|             try:
 #|                 self.sweep()
 #|             except Exception as exc:          # noqa: BLE001 -- see _guard
@@ -3126,7 +3306,7 @@ if __name__ == "__main__":
 #|         return t
 #|     def tracks(self):
 #|         return list(self._by_epoch.values())
-#| def serve_upload(reader, channel_names, sock_path, uploader, live: LiveRing):
+#| def serve_upload(reader, channel_names, sock_path, uploader, live: LiveRing, stop=None):
 #|     """Like :func:`serve`, but route utterances to the uploader (remote host)."""
 #|     sink = RemoteVoiceSink(reader, uploader)
 #|     enr = VoiceEnricher(reader, channel_names, sink, live)
@@ -3137,12 +3317,22 @@ if __name__ == "__main__":
 #|     os.makedirs(os.path.dirname(sock_path), exist_ok=True)
 #|     rx = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 #|     rx.bind(sock_path)
-#|     while True:
+#|     if stop is not None:
+#|         rx.settimeout(0.5)                    # wake up to look at ``stop``
+#|     try:
+#|         while stop is None or not stop.is_set():
+#|             try:
+#|                 raw, _ = rx.recvfrom(128)
+#|                 enr.on_frame(raw)
+#|             except _READ_ERRS:                # includes the socket timeout
+#|                 continue
+#|     finally:
+#|         enr.stop()
 #|         try:
-#|             raw, _ = rx.recvfrom(128)
-#|             enr.on_frame(raw)
-#|         except _READ_ERRS:
-#|             continue
+#|             enr.flush_all()
+#|         except Exception:                     # noqa: BLE001 -- the old reader may be dead
+#|             pass
+#|         rx.close()
 #| ===== module: agent.voice_run =====
 #| """voice-enricher host runner -- attaches a reader to the game PID and serves"""
 #| import hashlib
@@ -3223,9 +3413,34 @@ if __name__ == "__main__":
 #|         raise FileNotFoundError("voice_tap.py not found (neither checkout nor bundle)")
 #|     _extract_tap_from_bundle(str(bundle), str(dest))
 #|     return str(dest)
-#| def run_remote_capture(*, base_url, agent_id, secret, pid, sock_path):
-#|     """Load the signed voice payload, spawn the tap with its constants, and"""
+#| # Seconds. Module level so the tests can shrink them.
+#| WATCH_S = 2.0               # how often a running capture looks at the game and the tap
+#| SETUP_RETRY_S = 300.0       # the payload / probe setup failed (network, central): try again
+#| NEW_PID_POLL_S = 5.0        # waiting for the game to come back
+#| NEW_GAME_GRACE_S = 30.0     # a new game process is still loading its first map
+#| TAP_RESPAWN_S = 10.0        # the tap died while the game is up: start it again
+#| TAP_FAST_FAIL_S = 30.0      # a tap that lives shorter than this counts as failing
+#| TAP_MAX_FAST_FAILS = 3      # ... and after this many in a row it is left alone
+#| def _proc_start(pid):
+#|     """The kernel's start time of ``pid`` (an opaque token), or ``None`` when"""
+#|     try:
+#|         with open(f"/proc/{pid}/stat", "rb") as fh:
+#|             raw = fh.read()
+#|         fields = raw[raw.rindex(b")") + 2:].split()
+#|         if fields[0] == b"Z":
+#|             return None
+#|         return fields[19]
+#|     except (OSError, ValueError, IndexError):
+#|         return None
+#| def _spawn_tap(argv):
 #|     import subprocess
+#|     try:
+#|         return subprocess.Popen(argv)
+#|     except OSError as exc:
+#|         logger.warning("voice tap spawn failed: %s", exc)
+#|         return None
+#| def run_remote_capture(*, base_url, agent_id, secret, pid, sock_path, pid_source=None):
+#|     """Load the signed voice payload, spawn the tap with its constants, and"""
 #|     import threading
 #|     import time
 #|     from sq_reader import SquadMemoryReader
@@ -3234,40 +3449,120 @@ if __name__ == "__main__":
 #|     from agent.payload_client import PayloadFetchError, load_payload
 #|     from agent.updater import AGENT_VERSION
 #|     from agent.voice_uploader import VoiceUploader
-#|     binary = f"/proc/{pid}/exe"
-#|     try:
-#|         # The payload is bound to the build it was made for unless it says it
-#|         build_sha = _squad_build_sha(binary)
-#|         load_payload(base_url=base_url, agent_id=agent_id, agent_secret=secret,
-#|                      kind="voice", agent_version=AGENT_VERSION, have_version=0,
-#|                      squad_build=build_sha)
-#|         import voice_probe  # installed by the payload loader
-#|         tap = _tap_script_path()
-#|     except (PayloadFetchError, OSError, ImportError) as exc:
-#|         logger.warning("voice capture not started: %s", exc)
-#|         return
-#|     func_vaddr = resolve_probe_address(voice_probe, binary, build_sha)
-#|     if func_vaddr is None:
-#|         logger.warning("voice capture not started: this game build (%s) does not "
-#|                        "match the probe; the function was not found exactly once",
-#|                        build_sha[:8])
-#|         return
-#|     logger.info("voice: probe address %#x for game build %s", func_vaddr, build_sha[:8])
-#|     reader = build_reader(pid)
-#|     up = VoiceUploader(base_url, agent_id, secret)
-#|     up.start()
-#|     argv = build_tap_argv("/usr/bin/python3", tap, pid=pid, binary=binary,
-#|                           sock=sock_path, func_vaddr=func_vaddr,
-#|                           offsets=voice_probe.PACKET_OFFSETS, owner=os.getpid())
-#|     def _spawn_tap():
-#|         time.sleep(1.0)            # let serve_upload bind the socket first
+#|     uploader = []                   # created once, with the first successful setup
+#|     shas = {}                       # (pid, start) -> build sha: the binary is read once
+#|     def capture_game(game_pid):
+#|         """Capture from one game process. Returns why it ended: ``gone`` (the"""
+#|         binary = f"/proc/{game_pid}/exe"
+#|         started = _proc_start(game_pid)
+#|         if started is None:
+#|             return "gone"
 #|         try:
-#|             subprocess.Popen(argv)
-#|         except OSError as exc:
-#|             logger.warning("voice tap spawn failed: %s", exc)
-#|     threading.Thread(target=_spawn_tap, daemon=True).start()
-#|     print(f"# voice(remote): pid={pid} -> {base_url}/ingest/voice", flush=True)
-#|     serve_upload(reader, SquadMemoryReader.VOICE_CHANNEL_NAMES, sock_path, up, LiveRing())
+#|             # The payload is bound to the build it was made for unless it says it
+#|             if (game_pid, started) not in shas:
+#|                 shas[(game_pid, started)] = _squad_build_sha(binary)
+#|             build_sha = shas[(game_pid, started)]
+#|             load_payload(base_url=base_url, agent_id=agent_id, agent_secret=secret,
+#|                          kind="voice", agent_version=AGENT_VERSION, have_version=0,
+#|                          squad_build=build_sha)
+#|             import voice_probe  # installed by the payload loader
+#|             tap = _tap_script_path()
+#|         except (PayloadFetchError, OSError, ImportError) as exc:
+#|             logger.warning("voice capture not started: %s", exc)
+#|             return "setup"
+#|         func_vaddr = resolve_probe_address(voice_probe, binary, build_sha)
+#|         if func_vaddr is None:
+#|             logger.warning("voice capture not started: this game build (%s) does not "
+#|                            "match the probe; the function was not found exactly once",
+#|                            build_sha[:8])
+#|             return "unsupported"
+#|         logger.info("voice: probe address %#x for game build %s", func_vaddr, build_sha[:8])
+#|         try:
+#|             reader = build_reader(game_pid)
+#|         except Exception as exc:    # noqa: BLE001 -- a game still loading its first map
+#|             logger.warning("voice capture not started: cannot read the game yet: %s", exc)
+#|             return "setup"
+#|         if not uploader:
+#|             up = VoiceUploader(base_url, agent_id, secret)
+#|             up.start()
+#|             uploader.append(up)
+#|         argv = build_tap_argv("/usr/bin/python3", tap, pid=game_pid, binary=binary,
+#|                               sock=sock_path, func_vaddr=func_vaddr,
+#|                               offsets=voice_probe.PACKET_OFFSETS, owner=os.getpid())
+#|         stop = threading.Event()
+#|         def _serve():
+#|             try:
+#|                 serve_upload(reader, SquadMemoryReader.VOICE_CHANNEL_NAMES, sock_path,
+#|                              uploader[0], LiveRing(), stop)
+#|             except Exception:       # noqa: BLE001
+#|                 logger.exception("voice: the enricher crashed")
+#|         server = threading.Thread(target=_serve, name="squad-voice-serve", daemon=True)
+#|         server.start()
+#|         time.sleep(1.0)             # let serve_upload bind the socket first
+#|         print(f"# voice(remote): pid={game_pid} -> {base_url}/ingest/voice", flush=True)
+#|         proc, spawned_at, fast_fails = None, 0.0, 0
+#|         outcome = "gone"
+#|         try:
+#|             while _proc_start(game_pid) == started:
+#|                 if not server.is_alive():
+#|                     outcome = "setup"           # nothing receives the tap's frames
+#|                     break
+#|                 if proc is None or proc.poll() is not None:
+#|                     if proc is not None:
+#|                         # poll() has reaped it. Died soon after it started = failing.
+#|                         fast_fails = (fast_fails + 1
+#|                                       if time.monotonic() - spawned_at < TAP_FAST_FAIL_S else 0)
+#|                         logger.warning("voice tap exited (rc=%s) while the game is up",
+#|                                        proc.returncode)
+#|                     if fast_fails >= TAP_MAX_FAST_FAILS:
+#|                         logger.error("voice tap keeps failing; leaving it until the "
+#|                                      "game restarts")
+#|                         proc = None
+#|                         while _proc_start(game_pid) == started:
+#|                             time.sleep(WATCH_S)
+#|                         break
+#|                     if proc is not None:
+#|                         time.sleep(TAP_RESPAWN_S)
+#|                     proc = _spawn_tap(argv)
+#|                     spawned_at = time.monotonic()
+#|                     if proc is None:
+#|                         fast_fails += 1
+#|                 time.sleep(WATCH_S)
+#|         finally:
+#|             stop.set()
+#|             if proc is not None and proc.poll() is None:
+#|                 try:
+#|                     proc.terminate()
+#|                 except OSError:
+#|                     pass
+#|             server.join(5.0)
+#|         if outcome == "gone":
+#|             logger.info("voice: game process %d is gone", game_pid)
+#|         return outcome
+#|     while True:
+#|         try:
+#|             outcome = capture_game(pid)
+#|         except Exception:           # noqa: BLE001 -- voice must never take the agent down
+#|             logger.exception("voice: capture crashed (non-fatal)")
+#|             outcome = "setup"
+#|         if pid_source is None:
+#|             return
+#|         if outcome == "setup":
+#|             if _proc_start(pid) is not None:
+#|                 time.sleep(SETUP_RETRY_S)           # same process, try the setup again
+#|                 continue
+#|         # The process is gone (or cannot be probed): wait for the next one.
+#|         while True:
+#|             try:
+#|                 nxt = pid_source()
+#|             except Exception:       # noqa: BLE001
+#|                 nxt = None
+#|             if nxt and nxt != pid and _proc_start(nxt) is not None:
+#|                 break
+#|             time.sleep(NEW_PID_POLL_S)
+#|         logger.info("voice: the game restarted (pid %d -> %d); capturing again", pid, nxt)
+#|         time.sleep(NEW_GAME_GRACE_S)
+#|         pid = nxt
 #| def main():
 #|     a = parse_voice_run_args(sys.argv[1:])
 #|     if a["mode"] == "remote":
@@ -3970,6 +4265,7 @@ if __name__ == "__main__":
 #| import argparse
 #| import logging
 #| import gc
+#| import signal
 #| import logging.handlers
 #| from pathlib import Path
 #| import math
@@ -4260,6 +4556,16 @@ if __name__ == "__main__":
 #|             return
 #|         self._last_error_repr = reason
 #|         logger.warning("push: %s (url=%s, seq=%d)", reason, self._url, self._seq)
+#| def _restart_agent() -> None:
+#|     """Manager asked for a restart: arrange the relaunch, then leave through the normal Ctrl-C path"""
+#|     from agent import _runtime, updater
+#|     path = _runtime.bundle_path()
+#|     if path is None:
+#|         logger.warning("control: restart requested but this is not a one-file agent; ignoring")
+#|         return
+#|     logger.info("control: restart requested by the manager")
+#|     updater.relaunch_later(path, delay=5)
+#|     os.kill(os.getpid(), signal.SIGINT)
 #| def _configure_logging(level_name: str, log_file: str | None) -> None:
 #|     level = getattr(logging, level_name.upper(), logging.INFO)
 #|     root = logging.getLogger()
@@ -4946,6 +5252,13 @@ if __name__ == "__main__":
 #|             )
 #|         except ImportError as exc:
 #|             logger.warning("updater unavailable (%s) — auto-update disabled", exc)
+#|         # The manager's Logs / Restart buttons: poll central every 30 s for a queued command.
+#|         from agent import control_client as _control
+#|         _threading.Thread(
+#|             target=_control.run_background, name='squad_agent-control', daemon=True,
+#|             kwargs=dict(base_url=args.push, agent_id=args.agent_id, agent_secret=pusher.secret,
+#|                         log_path=args.log_file, restart=_restart_agent),
+#|         ).start()
 #|     # Attach strategy:
 #|     reader_config = load_reader_config(
 #|         Path(args.config) if args.config else None
@@ -4982,11 +5295,15 @@ if __name__ == "__main__":
 #|             from agent.voice_run import run_remote_capture
 #|             _vsock = (os.environ.get('SQUAD_VOICE_SOCK')
 #|                       or '/run/squadvoice/%s.sock' % (args.agent_id or 'agent'))
+#|             # The game server is restarted now and then (squad1: every morning).
+#|             _voice_pid_source = (None if args.pid is not None
+#|                                  else (lambda: discover_squad_pid(reader_config)))
 #|             def _voice_boot(_pid):
 #|                 try:
 #|                     run_remote_capture(base_url=args.push, agent_id=args.agent_id,
 #|                                        secret=pusher.secret, pid=_pid,
-#|                                        sock_path=_vsock)
+#|                                        sock_path=_vsock,
+#|                                        pid_source=_voice_pid_source)
 #|                 except Exception:
 #|                     logger.exception("voice: capture thread crashed (non-fatal)")
 #|             _vthread.Thread(target=_voice_boot, args=(current_pid,),
