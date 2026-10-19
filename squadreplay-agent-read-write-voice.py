@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.87.0'
-_BUILT_FROM = '420b1710a628'
-_SECTION_SHA256 = '0fe2c325d2da07721c92e96ab365f49d7334c4a7da03c82b6865e126198a6449'
+_VERSION = '0.87.1'
+_BUILT_FROM = 'f839a7e7b78c'
+_SECTION_SHA256 = '00d520d8bf27bdd2959f971bb91b3dea6a82f50b8388cb5d774af22371365cf0'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -2761,7 +2761,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.0"
+#| AGENT_VERSION = "0.87.1"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -3726,91 +3726,161 @@ if __name__ == "__main__":
 #| import collections
 #| import logging
 #| import threading
+#| import time
+#| import urllib.error
 #| import urllib.request
 #| from ingest.protocol import encode_voice_envelope
 #| logger = logging.getLogger("voice-uploader")
+#| # One post carries at most this much audio (the base64 text, which is what
+#| MAX_BATCH_BYTES = 1_500_000
+#| MAX_BATCH_ITEMS = 150
+#| MIN_BATCH_BYTES = 60_000          # a 413 may halve the limit, never below this
+#| # Voice that could not be delivered for this long is dropped: the match it
+#| MAX_AGE_SECONDS = 900.0
+#| MAX_QUEUE_BYTES = 48 * 1024 * 1024
+#| MAX_PAUSE_SECONDS = 60.0
 #| def _http_post(url: str, body: bytes) -> int:
 #|     # User-Agent matters: Cloudflare's bot protection 403s requests without a
 #|     req = urllib.request.Request(
 #|         url, data=body,
 #|         headers={"Content-Type": "application/json",
 #|                  "User-Agent": "SquadReplay/1.0"})
-#|     with urllib.request.urlopen(req, timeout=10) as r:
-#|         return r.status
+#|     try:
+#|         with urllib.request.urlopen(req, timeout=10) as r:
+#|             return r.status
+#|     except urllib.error.HTTPError as e:
+#|         # An answer is not an outage: hand the status to flush_once, which
+#|         return e.code
 #| class VoiceUploader:
 #|     def __init__(self, base_url, agent_id, agent_secret, *,
-#|                  batch_interval=2.5, max_queue=2000, poster=None):
+#|                  batch_interval=2.5, max_queue=2000, poster=None,
+#|                  max_batch_bytes=MAX_BATCH_BYTES, max_batch_items=MAX_BATCH_ITEMS,
+#|                  max_age=MAX_AGE_SECONDS, max_queue_bytes=MAX_QUEUE_BYTES, clock=time.monotonic):
 #|         self.url = base_url.rstrip("/") + "/ingest/voice"
 #|         self.agent_id = agent_id
 #|         self.secret = agent_secret
 #|         self.batch_interval = batch_interval
 #|         self.max_queue = max_queue
+#|         self.max_batch_bytes = max_batch_bytes
+#|         self.max_batch_items = max_batch_items
+#|         self.max_age = max_age
+#|         self.max_queue_bytes = max_queue_bytes
+#|         self._clock = clock
 #|         self._poster = poster or _http_post
 #|         self._q = collections.deque()
+#|         self._bytes = 0
 #|         self._lock = threading.Lock()
 #|         self._seq = 0
 #|         self._stop = threading.Event()
 #|         self._thread = None
+#|         self._fail_streak = 0
 #|         self._stats = {"queued": 0, "sent": 0, "dropped": 0, "retries": 0}
 #|         self._last_posted_clips = []     # test seam
+#|     @staticmethod
+#|     def _size(item):
+#|         return len(item["ogg_b64"]) + 200
+#|     def _drop_oldest(self):
+#|         old = self._q.popleft()
+#|         self._bytes -= self._size(old)
+#|         self._stats["dropped"] += 1
 #|     def enqueue(self, match_id, clip_name, utterance, ogg):
 #|         item = {"matchId": match_id, "clip": clip_name,
-#|                 "u": utterance, "ogg_b64": base64.b64encode(ogg).decode()}
+#|                 "u": utterance, "ogg_b64": base64.b64encode(ogg).decode(),
+#|                 "t": self._clock()}
 #|         with self._lock:
-#|             while len(self._q) >= self.max_queue:
-#|                 self._q.popleft()
-#|                 self._stats["dropped"] += 1
+#|             while self._q and (len(self._q) >= self.max_queue
+#|                                or self._bytes + self._size(item) > self.max_queue_bytes):
+#|                 self._drop_oldest()
 #|             self._q.append(item)
+#|             self._bytes += self._size(item)
 #|             self._stats["queued"] = len(self._q)
 #|     def _drain_grouped(self):
+#|         now = self._clock()
 #|         with self._lock:
 #|             items = list(self._q)
 #|             self._q.clear()
+#|             self._bytes = 0
 #|             self._stats["queued"] = 0
+#|         fresh = [it for it in items if now - it["t"] <= self.max_age]
+#|         self._stats["dropped"] += len(items) - len(fresh)
 #|         groups = collections.OrderedDict()
-#|         for it in items:
+#|         for it in fresh:
 #|             groups.setdefault(it["matchId"], []).append(it)
 #|         return groups
 #|     def _requeue_front(self, items):
 #|         with self._lock:
 #|             self._q.extendleft(reversed(items))
-#|             while len(self._q) > self.max_queue:
-#|                 self._q.pop()          # keep newest on a retry backlog
+#|             self._bytes += sum(self._size(it) for it in items)
+#|             while self._q and (len(self._q) > self.max_queue or self._bytes > self.max_queue_bytes):
+#|                 old = self._q.pop()          # keep the OLDEST of a retry backlog's front, drop the newest
+#|                 self._bytes -= self._size(old)
 #|                 self._stats["dropped"] += 1
 #|             self._stats["queued"] = len(self._q)
+#|     def _chunks(self, items):
+#|         """The items of one match in posts of bounded size, order kept."""
+#|         chunk, size = [], 0
+#|         for it in items:
+#|             sz = len(it["ogg_b64"])
+#|             if chunk and (len(chunk) >= self.max_batch_items or size + sz > self.max_batch_bytes):
+#|                 yield chunk
+#|                 chunk, size = [], 0
+#|             chunk.append(it)
+#|             size += sz
+#|         if chunk:
+#|             yield chunk
+#|     def _post(self, match_id, items):
+#|         batch = {"matchId": match_id, "utterances": [
+#|             dict(it["u"], clip=it["clip"], opus_b64=it["ogg_b64"])
+#|             for it in items
+#|         ]}
+#|         self._seq += 1
+#|         body = encode_voice_envelope(
+#|             agent_id=self.agent_id, seq=self._seq,
+#|             agent_secret=self.secret, batch=batch,
+#|         )
+#|         return self._poster(self.url, body)
 #|     def flush_once(self):
 #|         groups = self._drain_grouped()
 #|         self._last_posted_clips = []
-#|         for match_id, items in groups.items():
-#|             batch = {"matchId": match_id, "utterances": [
-#|                 dict(it["u"], clip=it["clip"], opus_b64=it["ogg_b64"])
-#|                 for it in items
-#|             ]}
-#|             self._seq += 1
+#|         pending = [(m, c) for m, items in groups.items() for c in self._chunks(items)]
+#|         leftover = []
+#|         for n, (match_id, items) in enumerate(pending):
 #|             try:
-#|                 body = encode_voice_envelope(
-#|                     agent_id=self.agent_id, seq=self._seq,
-#|                     agent_secret=self.secret, batch=batch,
-#|                 )
-#|                 status = self._poster(self.url, body)
+#|                 status = self._post(match_id, items)
 #|             except (OSError, ValueError) as e:
 #|                 logger.info("voice post error: %s", e)
-#|                 self._stats["retries"] += 1
-#|                 self._requeue_front(items)
-#|                 continue
-#|             if 200 <= status < 300:
+#|                 status = None
+#|             if status is not None and 200 <= status < 300:
 #|                 self._stats["sent"] += len(items)
 #|                 self._last_posted_clips += [it["clip"] for it in items]
 #|             elif status == 403:
 #|                 # Not cleared: dropping is correct, retrying never helps.
 #|                 self._stats["dropped"] += len(items)
+#|             elif status == 413 and len(items) == 1:
+#|                 # One clip alone is over central's cap: it can never go.
+#|                 logger.info("voice clip %s is too large for central; dropped", items[0]["clip"])
+#|                 self._stats["dropped"] += 1
 #|             else:
+#|                 if status == 413:
+#|                     # Smaller posts from now on.
+#|                     self.max_batch_bytes = max(MIN_BATCH_BYTES, self.max_batch_bytes // 2)
+#|                     self.max_batch_items = max(1, self.max_batch_items // 2)
+#|                 if status is not None:
+#|                     logger.info("voice post refused: HTTP %s", status)
 #|                 self._stats["retries"] += 1
-#|                 self._requeue_front(items)
+#|                 # This post and everything behind it wait, in their order;
+#|                 leftover = [it for _m, chunk in pending[n:] for it in chunk]
+#|                 break
+#|         if leftover:
+#|             self._requeue_front(leftover)
+#|         self._fail_streak = self._fail_streak + 1 if leftover else 0
 #|     def stats(self):
 #|         return dict(self._stats)
+#|     def _pause(self):
+#|         """Seconds to wait before the next flush: the interval, doubled for"""
+#|         return min(MAX_PAUSE_SECONDS, self.batch_interval * (2 ** min(self._fail_streak, 5)))
 #|     def _loop(self):
-#|         while not self._stop.wait(self.batch_interval):
+#|         while not self._stop.wait(self._pause()):
 #|             try:
 #|                 self.flush_once()
 #|             except Exception:
