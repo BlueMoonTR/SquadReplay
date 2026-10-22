@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.87.2'
-_BUILT_FROM = 'aff73536c462'
-_SECTION_SHA256 = 'beb87eab671c77e532d1b2ca8dfcba78e4bcab57528a4a5a28ff2b6d04c5c5ed'
+_VERSION = '0.87.3'
+_BUILT_FROM = '26d91cf2584a'
+_SECTION_SHA256 = '4ed118f1418038e48c610bab7a7e9f8e23764bc20a5991837afb7e6caf38c959'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -435,6 +435,8 @@ if __name__ == "__main__":
 #| _SYSCTL_PATH        = Path("/etc/sysctl.d/99-squad-replay.conf")
 #| _SUDOERS_VOICE_PATH = Path("/etc/sudoers.d/squad-replay-voice")
 #| _DEFAULT_DEPLOY_REL = Path("BOTS") / "SquadReplay"      # under target user's $HOME
+#| # Places a downloaded file is only passing through.
+#| _TRANSIENT_DIRS = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"), Path("/run"))
 #| # ---------------------------------------------------------------------------
 #| def _ensure_root() -> None:
 #|     """Install touches /etc/sysctl.d and needs setcap — must be root."""
@@ -603,9 +605,39 @@ if __name__ == "__main__":
 #|         p = Path(onefile_dir).resolve()
 #|         if p.is_dir():
 #|             return p
+#|     # A single-file variant (a .py) is not a onefile binary, so the lines above
+#|     from agent import _runtime
+#|     bundle = _runtime.bundle_path()
+#|     if bundle is not None:
+#|         here = bundle.resolve().parent
+#|         if not any(here == t or t in here.parents for t in _TRANSIENT_DIRS):
+#|             return here
 #|     import pwd
 #|     home = Path(pwd.getpwnam(user).pw_dir)
 #|     return (home / _DEFAULT_DEPLOY_REL).resolve()
+#| def _enrolled_agent_id(workdir: Path) -> str | None:
+#|     """The agent id a directory's ``.env.agent`` belongs to, or ``None`` when"""
+#|     env = workdir / ".env.agent"
+#|     try:
+#|         text = env.read_text(encoding="utf-8")
+#|     except OSError:
+#|         return None
+#|     for line in text.splitlines():
+#|         if line.startswith("SQUAD_AGENT_ID="):
+#|             return line.split("=", 1)[1].strip() or "?"
+#|     return "?"
+#| def _refuse_to_replace_an_enrolled_agent(workdir: Path) -> None:
+#|     """``--enroll`` into a directory that already holds an agent does nothing"""
+#|     agent_id = _enrolled_agent_id(workdir)
+#|     if agent_id is None:
+#|         return
+#|     raise InstallError(
+#|         f"{workdir} already holds the enrolled agent '{agent_id}'; this token "
+#|         "was NOT used and nothing was changed. To install a second server on "
+#|         "this host, run the file from its own empty folder or pass "
+#|         "--deploy-dir <new folder>. To repair this one, run --install again "
+#|         "without --enroll."
+#|     )
 #| def _self_copy_to_deploy(deploy_dir: Path) -> Path:
 #|     """Place the running binary inside ``deploy_dir`` so the systemd"""
 #|     # A single-file variant (agent/_runtime.py) is a .py: the thing to put in
@@ -736,9 +768,28 @@ if __name__ == "__main__":
 #|     """The cron entry that starts the agent when the host boots. ``start.sh``"""
 #|     d = shlex.quote(str(workdir))
 #|     return f"@reboot cd {d} && ./start.sh >> logs/boot.log 2>&1 {AUTOSTART_MARKER}\n"
+#| def _autostart_dir(line: str) -> str | None:
+#|     """The directory an autostart entry of ours starts, or ``None`` for a line"""
+#|     if AUTOSTART_MARKER not in line:
+#|         return None
+#|     m = re.match(r"\s*@reboot\s+cd\s+(.+?)\s+&&", line)
+#|     if not m:
+#|         return ""
+#|     try:
+#|         parts = shlex.split(m.group(1))
+#|     except ValueError:
+#|         return ""
+#|     return parts[0] if parts else ""
 #| def _merge_crontab(existing: str, line: str) -> str:
-#|     """``existing`` with our entry present exactly once (any older entry of ours"""
-#|     kept = [ln for ln in (existing or "").splitlines() if AUTOSTART_MARKER not in ln]
+#|     """``existing`` with our entry for this directory present exactly once (an"""
+#|     mine = _autostart_dir(line)
+#|     kept = []
+#|     for ln in (existing or "").splitlines():
+#|         theirs = _autostart_dir(ln)
+#|         if theirs is None:
+#|             kept.append(ln)
+#|         elif theirs and theirs != mine and Path(theirs).is_dir():
+#|             kept.append(ln)        # another server's entry, still installed
 #|     return "".join(ln + "\n" for ln in kept) + line
 #| def _install_autostart(user: str, workdir: Path) -> bool:
 #|     """Add the @reboot entry to ``user``'s crontab. No systemd unit is installed"""
@@ -838,6 +889,9 @@ if __name__ == "__main__":
 #|     logger.info("target service user: %s", target_user)
 #|     # 2. Place binary into deploy dir under target user's home.
 #|     workdir = _resolve_deploy_dir(target_user, deploy_dir)
+#|     logger.info("install directory: %s", workdir)
+#|     if enroll_token:
+#|         _refuse_to_replace_an_enrolled_agent(workdir)
 #|     # The person installing is about to become the data controller for
 #|     from agent import _legal
 #|     try:
@@ -2761,7 +2815,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.2"
+#| AGENT_VERSION = "0.87.3"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -3435,7 +3489,8 @@ if __name__ == "__main__":
 #| def _spawn_tap(argv):
 #|     import subprocess
 #|     try:
-#|         return subprocess.Popen(argv)
+#|         # stdin is NOT the terminal the agent runs in. `sudo` (use_pty is on in
+#|         return subprocess.Popen(argv, stdin=subprocess.DEVNULL)
 #|     except OSError as exc:
 #|         logger.warning("voice tap spawn failed: %s", exc)
 #|         return None
