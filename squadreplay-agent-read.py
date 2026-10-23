@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read'
-_VERSION = '0.87.3'
-_BUILT_FROM = '26d91cf2584a'
-_SECTION_SHA256 = 'b6611b094d82fd3e3b0021f2259aea81ce182baa69a2c151c6dec67348cc05de'
+_VERSION = '0.87.4'
+_BUILT_FROM = '364b26ffe539'
+_SECTION_SHA256 = 'e6cf7311adba03d3a4902e43f31f5bc55801d92bce37c4f6ed10fbfe7eaadb2f'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -584,17 +584,48 @@ if __name__ == "__main__":
 #| # ---------------------------------------------------------------------------
 #| # The game Port launch arg, not QueryPort: the negative lookbehind rejects a
 #| _PORT_RE = re.compile(r"(?<![A-Za-z])Port=(\d+)")
-#| def _detect_squad_port() -> int | None:
-#|     """The game Port of a running SquadGameServer, read from its launch args."""
+#| def _detect_squad_ports() -> list[int]:
+#|     """The game Ports of the running SquadGameServers, read from their launch"""
+#|     ports: list[int] = []
 #|     try:
 #|         from agent import _platform
 #|         for _pid, cmdline in _platform.list_processes_by_name(_SQUAD_COMM):
 #|             m = _PORT_RE.search(cmdline or "")
-#|             if m:
-#|                 return int(m.group(1))
+#|             if m and int(m.group(1)) not in ports:
+#|                 ports.append(int(m.group(1)))
 #|     except Exception:
 #|         pass
-#|     return None
+#|     return ports
+#| def _choose_squad_port(running: list[int], ask) -> int:
+#|     """The game Port the new agent attaches to. ``ask`` is ``input``."""
+#|     if len(running) > 1:
+#|         shown = ", ".join(str(p) for p in running)
+#|         try:
+#|             entered = ask(
+#|                 f"[install] Several Squad servers are running (game Ports {shown}). "
+#|                 f"Which Port is THIS agent for? ").strip()
+#|         except (EOFError, KeyboardInterrupt):
+#|             entered = ""
+#|         if not entered.isdigit():
+#|             raise InstallError(
+#|                 f"several Squad servers are running (game Ports {shown}) and no Port "
+#|                 f"was chosen. Run the installer again and type the game Port of the "
+#|                 f"server this agent belongs to.")
+#|         return int(entered)
+#|     default_port = running[0] if running else 7787
+#|     try:
+#|         entered = ask(f"[install] Squad game Port [{default_port}]: ").strip()
+#|     except (EOFError, KeyboardInterrupt):
+#|         entered = ""
+#|     if entered.isdigit():
+#|         return int(entered)
+#|     if entered:
+#|         logger.warning("'%s' is not a port number; using %d", entered, default_port)
+#|     return default_port
+#| def _detect_squad_port() -> int | None:
+#|     """The game Port of the one running SquadGameServer, or None when there is"""
+#|     ports = _detect_squad_ports()
+#|     return ports[0] if len(ports) == 1 else None
 #| # ---------------------------------------------------------------------------
 #| def _resolve_deploy_dir(user: str, override: Path | None) -> Path:
 #|     if override is not None:
@@ -917,17 +948,7 @@ if __name__ == "__main__":
 #|     config_path = workdir / "squad_replay_config.json"
 #|     if not config_path.exists():
 #|         import json as _json
-#|         default_port = _detect_squad_port() or 7787
-#|         try:
-#|             entered = input(f"[install] Squad game Port [{default_port}]: ").strip()
-#|         except (EOFError, KeyboardInterrupt):
-#|             entered = ""
-#|         if entered.isdigit():
-#|             port = int(entered)
-#|         else:
-#|             port = default_port
-#|             if entered:
-#|                 logger.warning("'%s' is not a port number; using %d", entered, port)
+#|         port = _choose_squad_port(_detect_squad_ports(), input)
 #|         logger.info("agent will attach to the SquadGameServer on game Port=%d", port)
 #|         config_path.write_text(
 #|             _json.dumps(
@@ -1123,7 +1144,15 @@ if __name__ == "__main__":
 #|                 except OSError:
 #|                     pass
 #|         else:
-#|             # No target_path configured — accept any process with matching comm.
+#|             # No target_path configured: accept a process with the matching
+#|             try:
+#|                 exe_name = os.path.basename(os.readlink(pid_dir / "exe"))
+#|             except OSError:
+#|                 exe_name = None
+#|             if exe_name is not None:
+#|                 exe_name = exe_name.removesuffix(" (deleted)")
+#|                 if exe_name[:15] != target_comm:
+#|                     continue
 #|             exact_candidates.append(int(pid_dir.name))
 #|     # Prefer exact matches; fall back to inode matches.
 #|     candidates = exact_candidates if exact_candidates else inode_candidates
@@ -2665,7 +2694,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.3"
+#| AGENT_VERSION = "0.87.4"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
