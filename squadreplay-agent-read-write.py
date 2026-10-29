@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.87.4'
-_BUILT_FROM = '364b26ffe539'
-_SECTION_SHA256 = '30ac5acfa3fe8f0e2b02933f5eb6e136591feca9e2f1d5b7fe21c1e92d4e9b53'
+_VERSION = '0.87.5'
+_BUILT_FROM = '86b75d5520c1+modified'
+_SECTION_SHA256 = 'b153933093e7d7b682680cec69e248fa5fa3a9afbc2a78ea60ae5bdc7ed1a642'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -642,7 +642,11 @@ if __name__ == "__main__":
 #|     if bundle is not None:
 #|         here = bundle.resolve().parent
 #|         if not any(here == t or t in here.parents for t in _TRANSIENT_DIRS):
-#|             return here
+#|             why = _why_not_an_install_dir(here)
+#|             if why is None:
+#|                 return here
+#|             # Run from a home directory (the file was downloaded straight into it): that
+#|             logger.warning("not installing into the folder the agent was run from: %s", why)
 #|     import pwd
 #|     home = Path(pwd.getpwnam(user).pw_dir)
 #|     return (home / _DEFAULT_DEPLOY_REL).resolve()
@@ -861,15 +865,58 @@ if __name__ == "__main__":
 #|     logger.info("player stats will be kept in %s", path)
 #|     return path
 #| def _chown_recursive(path: Path, user: str) -> None:
+#|     """Hand ``path`` (and, for a folder, everything in it) to ``user``. Only for a folder"""
 #|     import pwd
 #|     pw = pwd.getpwnam(user)
-#|     os.chown(path, pw.pw_uid, pw.pw_gid)
-#|     if path.is_dir():
+#|     os.chown(path, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
+#|     if path.is_dir() and not path.is_symlink():
 #|         for child in path.rglob("*"):
 #|             try:
-#|                 os.chown(child, pw.pw_uid, pw.pw_gid)
+#|                 os.chown(child, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
 #|             except OSError:
 #|                 pass
+#| #: What the installer itself puts in the install folder (and what the agent writes there
+#| _AGENT_FILE_PATTERNS = (
+#|     "squadreplay-agent-*.py", "squadreplay-voice-tap.py", "SquadReplay", "start.sh",
+#|     "start-bundle.sh", ".env.agent", ".env.agent.*", "squad_replay_config.json",
+#|     "legal_accepted.json", "player-stats.sqlite*", "*.push.seq", "*.version.lock",
+#|     "anchor_cache.json",
+#| )
+#| #: Folders the installer made; handed over with their content.
+#| _AGENT_DIRS = ("logs",)
+#| def _hand_over(workdir: Path, user: str) -> None:
+#|     """Give the agent's user the install folder and the agent's own files in it."""
+#|     import fnmatch
+#|     import pwd
+#|     pw = pwd.getpwnam(user)
+#|     os.chown(workdir, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
+#|     for entry in workdir.iterdir():
+#|         if entry.name in _AGENT_DIRS and entry.is_dir() and not entry.is_symlink():
+#|             _chown_recursive(entry, user)
+#|         elif any(fnmatch.fnmatch(entry.name, pat) for pat in _AGENT_FILE_PATTERNS):
+#|             os.chown(entry, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
+#| #: Folders that are never an install folder, whatever they hold.
+#| _SYSTEM_DIRS = frozenset(Path(p) for p in (
+#|     "/", "/home", "/root", "/etc", "/usr", "/var", "/opt", "/srv", "/boot", "/bin", "/sbin",
+#|     "/lib", "/lib64", "/proc", "/sys", "/dev", "/mnt", "/media", "/run", "/tmp"))
+#| #: What a person's home directory holds and an agent folder never does.
+#| _HOME_MARKERS = (".ssh", ".bashrc", ".profile", ".bash_history", ".gnupg", ".bash_logout")
+#| def _why_not_an_install_dir(path: Path) -> str | None:
+#|     """Why ``path`` must not be the install folder, or ``None`` when it may be. A folder"""
+#|     path = path.resolve()
+#|     if path in _SYSTEM_DIRS:
+#|         return f"{path} is a system folder"
+#|     try:
+#|         import pwd
+#|         for pw in pwd.getpwall():
+#|             if pw.pw_dir and Path(pw.pw_dir).resolve() == path:
+#|                 return f"{path} is the home directory of '{pw.pw_name}'"
+#|     except (OSError, KeyError):
+#|         pass
+#|     for name in _HOME_MARKERS:
+#|         if (path / name).exists():
+#|             return f"{path} holds {name}, so it looks like a home directory"
+#|     return None
 #| # ---------------------------------------------------------------------------
 #| _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,32}$")
 #| def _run_enroll_as_user(user: str, deploy_dir: Path, binary: Path, token: str) -> None:
@@ -921,6 +968,14 @@ if __name__ == "__main__":
 #|     # 2. Place binary into deploy dir under target user's home.
 #|     workdir = _resolve_deploy_dir(target_user, deploy_dir)
 #|     logger.info("install directory: %s", workdir)
+#|     refusal = _why_not_an_install_dir(workdir)
+#|     if refusal:
+#|         raise InstallError(
+#|             f"{refusal}. The installer hands its install folder to '{target_user}', the user "
+#|             "that runs the Squad server -- doing that to a home directory takes the owner's "
+#|             "own files (.ssh, keys, history) away from them. Nothing was changed. Put the "
+#|             "agent in a folder of its own (for example: mkdir ~/squadreplay, move the agent "
+#|             "file into it and run it from there) or pass --deploy-dir <new folder>.")
 #|     if enroll_token:
 #|         _refuse_to_replace_an_enrolled_agent(workdir)
 #|     # The person installing is about to become the data controller for
@@ -939,7 +994,7 @@ if __name__ == "__main__":
 #|     # No replays/ dir: a pushing agent never writes replays locally -- central
 #|     binary = _self_copy_to_deploy(workdir)
 #|     _write_start_sh(workdir, target_user)
-#|     _chown_recursive(workdir, target_user)
+#|     _hand_over(workdir, target_user)
 #|     # 3. Apply ptrace permissions (primary: sysctl drop-in; secondary: file caps).
 #|     _write_sysctl_dropin()
 #|     # 3b. Voice variants need python3-bpfcc + passwordless sudo for the eBPF
@@ -2840,7 +2895,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.4"
+#| AGENT_VERSION = "0.87.5"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
