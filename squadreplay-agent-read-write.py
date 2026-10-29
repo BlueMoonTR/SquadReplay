@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.87.5'
-_BUILT_FROM = '86b75d5520c1+modified'
-_SECTION_SHA256 = 'b153933093e7d7b682680cec69e248fa5fa3a9afbc2a78ea60ae5bdc7ed1a642'
+_VERSION = '0.87.6'
+_BUILT_FROM = '3364c75a2246+modified'
+_SECTION_SHA256 = 'cf69865c62e41f2b2dde7d22152d12ee5b463be4773b793bb50eb7a8246baa3a'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -2877,6 +2877,101 @@ if __name__ == "__main__":
 #|         pub.verify(sig, canonical)
 #|     except InvalidSignature as exc:
 #|         raise SignatureError("signature does not verify") from exc
+#| ===== module: agent.single_instance =====
+#| """agent/single_instance.py -- one agent per game server."""
+#| from __future__ import annotations
+#| import errno
+#| import logging
+#| import socket
+#| import struct
+#| import sys
+#| import time
+#| logger = logging.getLogger(__name__)
+#| #: ``start.sh`` backs off for 300 s instead of restarting at once on 2, 4, 5 and 6.
+#| EXIT_ALREADY_RUNNING = 6
+#| #: How long a newcomer waits for the previous agent to let go (it may be mid-exit).
+#| DEFAULT_WAIT_S = 20.0
+#| _PREFIX = b"\0squadreplay-agent-attached-"
+#| class AlreadyRunning(RuntimeError):
+#|     """Another agent holds the game server. ``holder_pid`` is that agent's pid when it"""
+#|     def __init__(self, game_pid: int, holder_pid: int = 0, holder_cmd: str = ""):
+#|         self.game_pid = game_pid
+#|         self.holder_pid = holder_pid
+#|         self.holder_cmd = holder_cmd
+#|         super().__init__(f"another agent is already attached to game process {game_pid}")
+#| def _name(game_pid: int) -> bytes:
+#|     return _PREFIX + str(int(game_pid)).encode("ascii")
+#| def _holder(game_pid: int) -> tuple[int, str]:
+#|     """Who holds the claim: connect to the listening socket and read the peer"""
+#|     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+#|     try:
+#|         s.settimeout(1.0)
+#|         s.connect(_name(game_pid))
+#|         pid, _uid, _gid = struct.unpack("3i", s.getsockopt(
+#|             socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+#|     except OSError:
+#|         return 0, ""
+#|     finally:
+#|         s.close()
+#|     cmd = ""
+#|     try:
+#|         with open(f"/proc/{pid}/cmdline", "rb") as fh:
+#|             cmd = fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()[:200]
+#|     except OSError:
+#|         pass
+#|     return pid, cmd
+#| class InstanceGuard:
+#|     """Holds this process's claim on one game server at a time."""
+#|     def __init__(self) -> None:
+#|         self._sock: socket.socket | None = None
+#|         self._game_pid: int | None = None
+#|     @property
+#|     def game_pid(self) -> int | None:
+#|         return self._game_pid
+#|     def release(self) -> None:
+#|         if self._sock is not None:
+#|             try:
+#|                 self._sock.close()
+#|             except OSError:
+#|                 pass
+#|         self._sock = None
+#|         self._game_pid = None
+#|     def claim(self, game_pid: int, *, wait_s: float = 0.0,
+#|               sleep=time.sleep, clock=time.monotonic) -> None:
+#|         """Take the claim on ``game_pid`` (dropping the previous one first, as a re-attach to"""
+#|         if self._game_pid == game_pid and self._sock is not None:
+#|             return
+#|         self.release()
+#|         deadline = clock() + max(0.0, wait_s)
+#|         while True:
+#|             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+#|             try:
+#|                 s.bind(_name(game_pid))
+#|                 s.listen(1)
+#|             except OSError as exc:
+#|                 s.close()
+#|                 if exc.errno != errno.EADDRINUSE:
+#|                     logger.warning("single-instance guard unavailable (%s); running unguarded", exc)
+#|                     return
+#|                 if clock() >= deadline:
+#|                     pid, cmd = _holder(game_pid)
+#|                     raise AlreadyRunning(game_pid, pid, cmd) from None
+#|                 sleep(0.5)
+#|                 continue
+#|             self._sock, self._game_pid = s, game_pid
+#|             return
+#|     def claim_or_exit(self, game_pid: int, *, wait_s: float = DEFAULT_WAIT_S) -> None:
+#|         """``claim`` for the agent's main thread: say plainly what is wrong and exit with"""
+#|         try:
+#|             self.claim(game_pid, wait_s=wait_s)
+#|         except AlreadyRunning as exc:
+#|             who = f" (pid {exc.holder_pid}: {exc.holder_cmd})" if exc.holder_pid else ""
+#|             logger.error(
+#|                 "Another SquadReplay agent is already attached to this game server%s. Two agents "
+#|                 "for one server push everything twice and invalidate each other's sequence "
+#|                 "numbers, so this copy is exiting. Find the other one (pgrep -af squadreplay, "
+#|                 "tmux ls, ps for start.sh) and stop it; this one will not run alongside it.", who)
+#|             sys.exit(EXIT_ALREADY_RUNNING)
 #| ===== module: agent.updater =====
 #| """agent/updater.py — fetch, verify, self-replace."""
 #| from __future__ import annotations
@@ -2895,7 +2990,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.5"
+#| AGENT_VERSION = "0.87.6"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -4254,7 +4349,7 @@ if __name__ == "__main__":
 #|         pusher.push(frame_json.encode('utf-8'))
 #|     except Exception:
 #|         logger.exception("position-sample push raised")
-#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep) -> None:
+#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep, guard=None) -> None:
 #|     """The open loop. ``session.tick()`` (the closed Squad tick) returns a"""
 #|     while True:
 #|         try:
@@ -4262,7 +4357,11 @@ if __name__ == "__main__":
 #|             if tick.reattach:
 #|                 # Finding the game process is ours; building the reader is the session's.
 #|                 try:
-#|                     session.attach(find_pid())
+#|                     new_pid = find_pid()
+#|                     if guard is not None and new_pid:
+#|                         # The game restarted: the claim follows it. SystemExit is not an
+#|                         guard.claim_or_exit(new_pid)
+#|                     session.attach(new_pid)
 #|                 except Exception:
 #|                     logger.exception("re-attach failed")
 #|                     sleep(session.interval)
@@ -4605,6 +4704,10 @@ if __name__ == "__main__":
 #|             reader_config.get("attach_retry_seconds", 5),
 #|         )
 #|         current_pid = wait_for_squad_pid(reader_config)
+#|     # One agent per game server (agent/single_instance.py): claim the game process BEFORE
+#|     from agent.single_instance import InstanceGuard
+#|     instance_guard = InstanceGuard()
+#|     instance_guard.claim_or_exit(current_pid)
 #|     session.attach(current_pid)
 #|     # Shared-memory channel: readers (HTTP server) mmap this file, so every
 #|     channel = _LocalChannel(args.output, use_mmap=not args.no_mmap,
@@ -4636,7 +4739,8 @@ if __name__ == "__main__":
 #|         except Exception as _e:
 #|             logger.warning("queue_priority plugin unavailable: %s", _e)
 #|     _run_loop(session, pusher=pusher, mirror=local_mirror, channel=channel,
-#|               find_pid=lambda: wait_for_squad_pid(reader_config))
+#|               find_pid=lambda: wait_for_squad_pid(reader_config),
+#|               guard=None if args.pid is not None else instance_guard)
 #| def _dump_crash_log(exc: BaseException) -> str | None:
 #|     """Write a per-crash forensic log so post-mortem doesn't depend on"""
 #|     try:
