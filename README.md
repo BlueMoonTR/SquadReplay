@@ -66,8 +66,13 @@ one-time enrollment token, and you run the variant on your own Squad host.
 single-use and ties this host to your community.
 
 **2. Download the variant you want** (see [Which variant?](#which-variant)
-below), e.g. `squadreplay-agent-read.py`. It is one file; there is nothing else
-to download.
+below), e.g. `squadreplay-agent-read.py`, **into a folder of its own** (not your
+home directory). It is one file; there is nothing else to download.
+
+```sh
+mkdir -p squadreplay && cd squadreplay
+curl -fsSLO https://raw.githubusercontent.com/BlueMoonTR/SquadReplay/main/squadreplay-agent-read.py
+```
 
 **3. Read it**, if you want to know what it does. A `read` file has no code that
 writes to the game process; the voice code is only in the `voice` variants.
@@ -80,8 +85,9 @@ sudo python3 squadreplay-agent-read.py --install --enroll <token>
 ```
 
 `--install` auto-detects the running `SquadGameServer`, chooses a deploy
-directory (default `~/BOTS/SquadReplay` of the Squad user; override with
-`--deploy-dir`), creates the local stats file
+directory (the folder you ran it from; a home directory is never used, the
+default is then `~/BOTS/SquadReplay` of the Squad user; override with
+`--deploy-dir`), hands only its own files to the Squad user, creates the local stats file
 ([`player-stats.sqlite`](#your-own-copy-of-the-stats-player-statssqlite)),
 and provisions the agent with central. It is idempotent —
 safe to re-run as a repair step. A **voice** variant additionally installs
