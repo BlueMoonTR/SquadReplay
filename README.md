@@ -18,7 +18,10 @@ access it needs.
 > For the **voice** variants, `--install` sets up the host prerequisites: it
 > installs `python3-bpfcc` and writes a narrow sudoers rule that lets the agent
 > run the capture tap as root (it needs `CAP_BPF`/`CAP_PERFMON`), pinned to the
-> system `python3` and the exact tap path — not a general root grant. The
+> system `python3` and the exact tap path — not a general root grant. It also
+> adds a `tmpfiles.d` rule (`/etc/tmpfiles.d/squadreplay-voice.conf`) that
+> recreates the socket directory `/run/squadvoice` at every boot, owned by the
+> agent's user and mode 0755. The
 > community must still be cleared for voice on the central server. Without the
 > prerequisites or the clearance the voice variant still reads and pushes; it
 > just does not capture. See [Voice](#voice) and [LEGAL.md](LEGAL.md).
@@ -91,7 +94,8 @@ default is then `~/BOTS/SquadReplay` of the Squad user; override with
 ([`player-stats.sqlite`](#your-own-copy-of-the-stats-player-statssqlite)),
 and provisions the agent with central. It is idempotent —
 safe to re-run as a repair step. A **voice** variant additionally installs
-`python3-bpfcc` and a narrow sudoers rule for the capture tap, and asks you to
+`python3-bpfcc`, a narrow sudoers rule for the capture tap and a `tmpfiles.d`
+rule that recreates its socket directory (`/run/squadvoice`) at boot, and asks you to
 accept the data-controller responsibility ([LEGAL.md](LEGAL.md)); pass
 `--accept-legal` to accept non-interactively. Use `--force-user <user>` if
 several Squad servers run under different accounts on the host.
