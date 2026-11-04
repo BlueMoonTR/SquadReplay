@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.87.7'
-_BUILT_FROM = '88a8fdd91a2d'
-_SECTION_SHA256 = '6fafbcd54d3a543375ce29ca838a48efdb9de76fbcfa72ab7f9d55d22eb645a9'
+_VERSION = '0.87.8'
+_BUILT_FROM = 'de1c233fed8d'
+_SECTION_SHA256 = 'f35829be19e83ef8fb9d0f2cbc7b924be00db8da2cac32c19c74664220b6297d'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -2831,10 +2831,16 @@ if __name__ == "__main__":
 #|         raise QueuePriorityFetchError(f"config not json: {e}") from e
 #|     if not isinstance(doc, dict) or 'enabled' not in doc:
 #|         raise QueuePriorityFetchError("response missing 'enabled'")
+#|     refresh_mode = doc.get('refresh_mode')
+#|     cache_refresh_seconds = doc.get('cache_refresh_seconds')
 #|     return {
 #|         'enabled': bool(doc.get('enabled')),
 #|         'reservet1': [e for e in (doc.get('reservet1') or []) if isinstance(e, str)],
 #|         'reservet2': [e for e in (doc.get('reservet2') or []) if isinstance(e, str)],
+#|         'refresh_mode': refresh_mode if refresh_mode in ('instant', 'map_change') else 'map_change',
+#|         'cache_refresh_seconds': (int(cache_refresh_seconds)
+#|                                    if isinstance(cache_refresh_seconds, (int, float))
+#|                                    and cache_refresh_seconds >= 10 else 120),
 #|     }
 #| __all__ = ["QueuePriorityFetchError", "fetch_queue_priority"]
 #| ===== module: agent.secret_store =====
@@ -3028,7 +3034,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.7"
+#| AGENT_VERSION = "0.87.8"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
