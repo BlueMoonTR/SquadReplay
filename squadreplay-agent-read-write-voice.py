@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write-voice'
-_VERSION = '0.87.11'
-_BUILT_FROM = 'c3af8a453a2f'
-_SECTION_SHA256 = 'f370486b6271fe10949cf82730a8cf251eab79ce7d6f3285e7122cc3ab4181a2'
+_VERSION = '0.87.12'
+_BUILT_FROM = 'fe3d02add36d'
+_SECTION_SHA256 = '4a392b9165b3be95f8ee4a83f35e06d0e8ccbd2059998d8578c44e4db8cc106d'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -3034,7 +3034,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.11"
+#| AGENT_VERSION = "0.87.12"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
