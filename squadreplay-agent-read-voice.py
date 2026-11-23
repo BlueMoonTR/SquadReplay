@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-voice'
-_VERSION = '0.87.12'
-_BUILT_FROM = 'fe3d02add36d'
-_SECTION_SHA256 = '578b2badc712d74eed58317daa2b78aba2ce27a1dbea242a37f348466a3f7605'
+_VERSION = '0.87.13'
+_BUILT_FROM = 'bffc5bb5c602'
+_SECTION_SHA256 = '2854035a4851e215bad3738ff4065bc4fa1ab97abfebff615e7143f8e16b79fe'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -1570,6 +1570,225 @@ if __name__ == "__main__":
 #|                 upload_log_result(base_url=base_url, agent_id=agent_id, agent_secret=agent_secret,
 #|                                   log_tail=redact_log_text(tail[0]), truncated=tail[1])
 #|         time.sleep(CONTROL_POLL_SECONDS)
+#| ===== module: agent.event_log =====
+#| """agent/event_log.py -- a day-by-day log of the game's kill and wound events, kept on the community's own host."""
+#| from __future__ import annotations
+#| import collections
+#| import json
+#| import logging
+#| import os
+#| import time
+#| from datetime import datetime
+#| logger = logging.getLogger("squad_replay")
+#| KEEP_SECONDS = 24 * 3600
+#| MAX_FILE_BYTES = 64 * 1024 * 1024
+#| _PREFIX = "events-"
+#| _SUFFIX = ".jsonl"
+#| _STATE = ".events-state.json"
+#| _SEEN_MAX = 6000
+#| _SWEEP_EVERY_S = 600.0
+#| _PRELOAD_LINES = 3000
+#| def process_start_time(pid: int) -> float | None:
+#|     """When process ``pid`` started, as epoch seconds (boot time + its start tick), or None if unreadable."""
+#|     try:
+#|         with open(f"/proc/{pid}/stat", "rb") as fh:
+#|             raw = fh.read().decode("utf-8", "replace")
+#|         fields = raw[raw.rindex(")") + 2:].split()
+#|         start_ticks = int(fields[19])                       # field 22 of the whole line
+#|         with open("/proc/stat", "rb") as fh:
+#|             btime = next(int(line.split()[1]) for line in fh.read().decode().splitlines() if line.startswith("btime "))
+#|         return btime + start_ticks / os.sysconf("SC_CLK_TCK")
+#|     except (OSError, ValueError, IndexError, StopIteration):
+#|         return None
+#| def _entry_type(kind: str, entry: dict) -> str:
+#|     if kind == "wound":
+#|         return "wound"
+#|     if entry.get("suicide"):
+#|         return "suicide"
+#|     if entry.get("teamkill"):
+#|         return "teamkill"
+#|     return "kill"
+#| def _person(p) -> dict | None:
+#|     if not isinstance(p, dict):
+#|         return None
+#|     return {"eosId": p.get("eosId"), "name": p.get("name"), "teamId": p.get("teamId")}
+#| def to_line(entry: dict, kind: str, match_id, ts_iso: str, seq: int) -> dict:
+#|     """One feed entry (``killEvents`` / ``woundEvents`` item) as a log line."""
+#|     out = {
+#|         "seq": seq,
+#|         "ts": ts_iso,
+#|         "type": _entry_type(kind, entry),
+#|         "ref": entry.get("id"),
+#|         "matchId": match_id or None,
+#|         "serverTs": entry.get("serverTs"),
+#|         "serverTsOf": entry.get("serverTsOf"),
+#|         "elapsedTime": entry.get("elapsedTime"),
+#|         "killer": _person(entry.get("killer")),
+#|         "victim": _person(entry.get("victim")),
+#|         "weapon": entry.get("weaponClass"),
+#|         "distance": entry.get("distance"),
+#|         "headshot": bool(entry.get("headshot")),
+#|         "damageType": entry.get("damageType"),
+#|         "killerVehicle": entry.get("killerVehicleClass"),
+#|         "victimVehicle": entry.get("victimVehicleClass"),
+#|     }
+#|     if entry.get("unknown"):
+#|         out["unknown"] = entry["unknown"]
+#|     return out
+#| def _key(line: dict) -> tuple:
+#|     v = line.get("victim") or {}
+#|     return (line.get("matchId"), line.get("ref"), v.get("eosId"), line.get("elapsedTime"))
+#| class EventLog:
+#|     def __init__(self, directory, *, keep_s: float = KEEP_SECONDS, clock=time.time):
+#|         self.dir = str(directory)
+#|         self.keep_s = keep_s
+#|         self._clock = clock
+#|         self._seen: "collections.OrderedDict[tuple, None]" = collections.OrderedDict()
+#|         self._seq_by_file: dict[str, int] = {}
+#|         self._last_sweep = 0.0
+#|         self._warned_full = False
+#|         self._ready = False
+#|         try:
+#|             os.makedirs(self.dir, mode=0o700, exist_ok=True)
+#|             self._ready = True
+#|         except OSError as exc:
+#|             logger.warning("event log disabled: cannot create %s (%s)", self.dir, exc)
+#|     # -- files ---------------------------------------------------------------
+#|     def _path(self, day: str) -> str:
+#|         return os.path.join(self.dir, f"{_PREFIX}{day}{_SUFFIX}")
+#|     def files(self) -> list[str]:
+#|         try:
+#|             return sorted(f for f in os.listdir(self.dir) if f.startswith(_PREFIX) and f.endswith(_SUFFIX))
+#|         except OSError:
+#|             return []
+#|     def _delete(self, names) -> int:
+#|         n = 0
+#|         for f in names:
+#|             try:
+#|                 os.unlink(os.path.join(self.dir, f))
+#|                 n += 1
+#|             except OSError:
+#|                 pass
+#|             self._seq_by_file.pop(f, None)
+#|         return n
+#|     def sweep(self, now: float | None = None) -> int:
+#|         """Delete files whose last write is older than ``keep_s``."""
+#|         now = self._clock() if now is None else now
+#|         old = []
+#|         for f in self.files():
+#|             try:
+#|                 if now - os.stat(os.path.join(self.dir, f)).st_mtime > self.keep_s:
+#|                     old.append(f)
+#|             except OSError:
+#|                 pass
+#|         return self._delete(old)
+#|     # -- the game process ----------------------------------------------------
+#|     def on_attach(self, pid) -> None:
+#|         """Called whenever the agent (re)attaches to the game. If the game process is a NEW one since the last log"""
+#|         if not self._ready or not pid:
+#|             return
+#|         try:
+#|             start = process_start_time(int(pid))
+#|             if start is None:
+#|                 return
+#|             state_path = os.path.join(self.dir, _STATE)
+#|             prev = None
+#|             try:
+#|                 with open(state_path, "r", encoding="utf-8") as fh:
+#|                     prev = json.load(fh).get("gameStart")
+#|             except (OSError, ValueError, AttributeError):
+#|                 prev = None
+#|             if isinstance(prev, (int, float)) and abs(prev - start) > 2.0:
+#|                 gone = self._delete(self.files())
+#|                 self._seen.clear()
+#|                 logger.info("event log: the game server restarted since the last log; %d earlier file(s) deleted", gone)
+#|             self._write_state(state_path, start, int(pid))
+#|         except Exception:                                           # noqa: BLE001 -- never costs the attach
+#|             logger.debug("event log on_attach failed", exc_info=True)
+#|     @staticmethod
+#|     def _write_state(path, start, pid) -> None:
+#|         tmp = path + ".tmp"
+#|         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+#|         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+#|             json.dump({"gameStart": start, "pid": pid}, fh)
+#|         os.replace(tmp, path)
+#|     # -- writing -------------------------------------------------------------
+#|     def _preload(self, name: str) -> None:
+#|         """Learn the keys and the last ``seq`` of a file that already exists (an agent restart mid-day)."""
+#|         path = os.path.join(self.dir, name)
+#|         seq = 0
+#|         try:
+#|             with open(path, "rb") as fh:
+#|                 fh.seek(0, os.SEEK_END)
+#|                 size = fh.tell()
+#|                 fh.seek(max(0, size - 1_500_000))
+#|                 tail = fh.read().decode("utf-8", "replace").splitlines()[-_PRELOAD_LINES:]
+#|         except OSError:
+#|             tail = []
+#|         for raw in tail:
+#|             try:
+#|                 line = json.loads(raw)
+#|             except ValueError:
+#|                 continue
+#|             seq = max(seq, int(line.get("seq") or 0))
+#|             self._seen[_key(line)] = None
+#|         while len(self._seen) > _SEEN_MAX:
+#|             self._seen.popitem(last=False)
+#|         self._seq_by_file[name] = seq
+#|     def observe(self, snapshot) -> int:
+#|         """Append this snapshot's NEW kill / wound entries. Returns how many lines were written. Never raises."""
+#|         if not self._ready:
+#|             return 0
+#|         try:
+#|             return self._observe(snapshot)
+#|         except Exception:                                           # noqa: BLE001
+#|             logger.debug("event log observe failed", exc_info=True)
+#|             return 0
+#|     def _observe(self, snapshot) -> int:
+#|         match_id = (snapshot.get("gameInfo") or {}).get("matchId")
+#|         batches = (("kill", snapshot.get("killEvents")), ("wound", snapshot.get("woundEvents")))
+#|         now = self._clock()
+#|         if now - self._last_sweep >= _SWEEP_EVERY_S:
+#|             self._last_sweep = now
+#|             self.sweep(now)
+#|         local = datetime.fromtimestamp(now).astimezone()
+#|         day = local.strftime("%Y-%m-%d")
+#|         name = f"{_PREFIX}{day}{_SUFFIX}"
+#|         if name not in self._seq_by_file:
+#|             self._preload(name)
+#|         out = []
+#|         for kind, entries in batches:
+#|             for entry in entries or ():
+#|                 if not isinstance(entry, dict):
+#|                     continue
+#|                 probe = {"matchId": match_id or None, "ref": entry.get("id"),
+#|                          "victim": entry.get("victim"), "elapsedTime": entry.get("elapsedTime")}
+#|                 key = _key(probe)
+#|                 if key in self._seen:
+#|                     continue
+#|                 self._seen[key] = None
+#|                 if len(self._seen) > _SEEN_MAX:
+#|                     self._seen.popitem(last=False)
+#|                 self._seq_by_file[name] += 1
+#|                 out.append(json.dumps(to_line(entry, kind, match_id, local.isoformat(timespec="seconds"),
+#|                                               self._seq_by_file[name]), ensure_ascii=False, separators=(",", ":")))
+#|         if not out:
+#|             return 0
+#|         path = self._path(day)
+#|         try:
+#|             if os.path.getsize(path) > MAX_FILE_BYTES:
+#|                 if not self._warned_full:
+#|                     self._warned_full = True
+#|                     logger.warning("event log: %s is over %d MB, not writing more today", name, MAX_FILE_BYTES >> 20)
+#|                 return 0
+#|         except OSError:
+#|             pass
+#|         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+#|         try:
+#|             os.write(fd, ("\n".join(out) + "\n").encode("utf-8"))
+#|         finally:
+#|             os.close(fd)
+#|         return len(out)
 #| ===== module: agent.local_db =====
 #| """agent/local_db.py -- the community's own copy of its match stats."""
 #| from __future__ import annotations
@@ -2882,7 +3101,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.12"
+#| AGENT_VERSION = "0.87.13"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -5055,12 +5274,46 @@ if __name__ == "__main__":
 #|             f.write(text)
 #| # Consecutive full-snapshot push failures. Escalates log severity so a
 #| _push_consec_fail = 0
-#| def _publish(snapshot, *, pusher, mirror, channel, offset_health) -> bool:
+#| # The wound feed is for the community's own tools on this host: central records wounds from damageEvents already, and
+#| _LOCAL_ONLY_KEYS = ('woundEvents',)
+#| def _central_copy(snapshot) -> dict:
+#|     """What central gets of a snapshot: no wound feed, and the kill feed WITHOUT the EOS ids it now carries for the local"""
+#|     out = {k: v for k, v in snapshot.items() if k not in _LOCAL_ONLY_KEYS}
+#|     kills = out.get('killEvents')
+#|     if isinstance(kills, list) and kills:
+#|         slim = []
+#|         for e in kills:
+#|             if isinstance(e, dict):
+#|                 e = dict(e)
+#|                 for side in ('killer', 'victim'):
+#|                     if isinstance(e.get(side), dict):
+#|                         e[side] = {k: v for k, v in e[side].items() if k != 'eosId'}
+#|             slim.append(e)
+#|         out['killEvents'] = slim
+#|     return out
+#| def _stamp_agent(snapshot, cycle_ms) -> None:
+#|     """The loader's half of the snapshot's ``agent`` block: which agent, which variant, how long the LAST whole cycle took"""
+#|     try:
+#|         block = snapshot.get('agent')
+#|         if not isinstance(block, dict):
+#|             block = snapshot['agent'] = {}
+#|         try:
+#|             from agent.updater import AGENT_VERSION
+#|         except ImportError:
+#|             AGENT_VERSION = None
+#|         block['version'] = AGENT_VERSION
+#|         block['variant'] = _agent_variant_name()
+#|         block['cycleMs'] = cycle_ms
+#|     except Exception:                                   # noqa: BLE001
+#|         pass
+#| def _publish(snapshot, *, pusher, mirror, channel, offset_health, events=None) -> bool:
 #|     """The one place a tick's snapshot leaves the process: the local player-stats"""
 #|     global _push_consec_fail
 #|     # Sanitize once; every output reuses the same text.
 #|     sanitized = sanitize_nan(snapshot)
 #|     compact = json.dumps(sanitized, ensure_ascii=False)
+#|     if events is not None:
+#|         events.observe(sanitized)                        # never raises
 #|     # Whatever the mirror does, the bytes pushed to central are already fixed.
 #|     if mirror is not None:
 #|         mirror.observe(sanitized)                        # never raises
@@ -5072,8 +5325,11 @@ if __name__ == "__main__":
 #|     if pusher is None:
 #|         return True
 #|     pusher._offset_health = offset_health
+#|     pushed = compact
+#|     if any(k in sanitized for k in _LOCAL_ONLY_KEYS) or sanitized.get('killEvents'):
+#|         pushed = json.dumps(_central_copy(sanitized), ensure_ascii=False)
 #|     try:
-#|         ok = pusher.push(compact.encode('utf-8'))
+#|         ok = pusher.push(pushed.encode('utf-8'))
 #|     except Exception:
 #|         ok = False
 #|         logger.exception("ingest push raised")           # never let a push bug stop memory reads
@@ -5095,8 +5351,9 @@ if __name__ == "__main__":
 #|         pusher.push(frame_json.encode('utf-8'))
 #|     except Exception:
 #|         logger.exception("position-sample push raised")
-#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep, guard=None) -> None:
+#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep, guard=None, events=None) -> None:
 #|     """The open loop. ``session.tick()`` (the closed Squad tick) returns a"""
+#|     last_cycle_ms = None
 #|     while True:
 #|         try:
 #|             tick = session.tick()
@@ -5117,12 +5374,14 @@ if __name__ == "__main__":
 #|             if tick.snapshot is None:
 #|                 sleep(tick.sleep_s)
 #|                 continue
+#|             _stamp_agent(tick.snapshot, last_cycle_ms)
 #|             try:
 #|                 _publish(tick.snapshot, pusher=pusher, mirror=mirror, channel=channel,
-#|                          offset_health=session.offset_health)
+#|                          offset_health=session.offset_health, events=events)
 #|             except Exception:
 #|                 logger.exception("publish failed")
 #|             cycle_dur = time.time() - tick.cycle_start
+#|             last_cycle_ms = int(round(cycle_dur * 1000))
 #|             logger.info(tick.summary.format(cycle=cycle_dur))
 #|             wait = max(0.1, tick.interval_s - cycle_dur)
 #|             if tick.sample_positions and pusher is not None:
@@ -5133,6 +5392,19 @@ if __name__ == "__main__":
 #|         except KeyboardInterrupt:
 #|             logger.info("Stopped by user (KeyboardInterrupt).")
 #|             break
+#| class _EventLogHook:
+#|     """Tells the event log which game process the agent is attached to, on every (re-)attach: a different process than"""
+#|     def __init__(self, event_log):
+#|         self.event_log = event_log
+#|     def before(self, is_new_match: bool) -> None:
+#|         pass
+#|     def after(self, snapshot: dict) -> None:
+#|         pass
+#|     def on_attach(self, reader) -> None:
+#|         try:
+#|             self.event_log.on_attach(reader.pm.process_id)
+#|         except Exception:                               # noqa: BLE001
+#|             logger.debug("event log on_attach hook failed", exc_info=True)
 #| def main():
 #|     # Self-install bootstrap. When ``--install`` is on argv we act as a
 #|     if "--install" in sys.argv:
@@ -5191,6 +5463,8 @@ if __name__ == "__main__":
 #|         ('--mmap-capacity', dict(type=int_, default=DEFAULT_CAPACITY, help='Shared-memory size in bytes (grows on overflow)')),
 #|         ('--local-db', dict(type=str_, default='player-stats.sqlite', metavar='PATH', help='Local SQLite copy of the match stats')),
 #|         ('--no-local-db', dict(action='store_true', help='Do not keep the local player-stats.sqlite')),
+#|         ('--event-log-dir', dict(type=str_, default='events', metavar='DIR', help='Kill/wound log folder (kept 24 h, dropped when the game restarts)')),
+#|         ('--no-event-log', dict(action='store_true', help='Do not keep the kill/wound event log')),
 #|         ('--push', dict(type=str_, metavar='URL', help='Central server URL (needs --agent-id and a secret)')),
 #|         ('--agent-id', dict(type=str_, help='Agent id registered at central (or env SQUAD_AGENT_ID)')),
 #|         ('--secret-hex', dict(type=str_, help='Agent secret in hex (or env SQUAD_AGENT_SECRET_HEX)')),
@@ -5444,11 +5718,20 @@ if __name__ == "__main__":
 #|         local_mirror = LocalMirror(args.local_db, server_id=args.agent_id)
 #|         import atexit
 #|         atexit.register(local_mirror.close)
+#|     # The day-by-day kill/wound log on this host (agent/event_log.py): kept for 24 h at most, and dropped when the game
+#|     event_log = None
+#|     if not args.no_event_log:
+#|         from agent.event_log import EventLog
+#|         event_log = EventLog(args.event_log_dir)
+#|         session.add_hook(_EventLogHook(event_log))
+#|         if session.reader is not None and getattr(session, 'pid', None):
+#|             event_log.on_attach(session.pid)
 #|     # Tune the cyclic GC for the reader's allocation workload. Each tick
 #|     gc.set_threshold(70000, 100, 100)
 #|     _run_loop(session, pusher=pusher, mirror=local_mirror, channel=channel,
 #|               find_pid=lambda: wait_for_squad_pid(reader_config),
-#|               guard=None if args.pid is not None else instance_guard)
+#|               guard=None if args.pid is not None else instance_guard,
+#|               events=event_log)
 #| def _dump_crash_log(exc: BaseException) -> str | None:
 #|     """Write a per-crash forensic log so post-mortem doesn't depend on"""
 #|     try:
