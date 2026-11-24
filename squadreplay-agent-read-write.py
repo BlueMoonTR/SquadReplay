@@ -28,9 +28,9 @@ import sys
 
 # ---- filled in by the bundler -------------------------------------------------
 _VARIANT = 'read-write'
-_VERSION = '0.87.13'
-_BUILT_FROM = 'bffc5bb5c602'
-_SECTION_SHA256 = '6a841ac9dda5ccf9b33da9436f8ea0042d8d98612753556eb8ba360c8d9b5e07'
+_VERSION = '0.87.14'
+_BUILT_FROM = 'c8edc6f3020a'
+_SECTION_SHA256 = 'e009ef42ddf1aac3247e8757718a83a40bbb1a4664e62478cff9b4b228170bbf'
 # -------------------------------------------------------------------------------
 
 #: Every embedded module begins with a line that starts exactly like this.
@@ -3231,6 +3231,83 @@ if __name__ == "__main__":
 #|                 "numbers, so this copy is exiting. Find the other one (pgrep -af squadreplay, "
 #|                 "tmux ls, ps for start.sh) and stop it; this one will not run alongside it.", who)
 #|             sys.exit(EXIT_ALREADY_RUNNING)
+#| ===== module: agent.tick_watchdog =====
+#| """agent/tick_watchdog.py -- an agent whose read tick never returns restarts itself instead of sitting there."""
+#| from __future__ import annotations
+#| import logging
+#| import os
+#| import sys
+#| import threading
+#| import time
+#| import traceback
+#| logger = logging.getLogger("squad_replay")
+#| EXIT_STUCK = 7
+#| DEFAULT_LIMIT_S = 180.0
+#| def _write_stack(stack_text: str, stuck_s: float):
+#|     """The stack goes to ``logs/crashes/`` (operator-only, like every other crash dump) and NOT to agent.log: the agent"""
+#|     try:
+#|         from pathlib import Path
+#|         d = Path("logs") / "crashes"
+#|         d.mkdir(parents=True, exist_ok=True)
+#|         path = d / (time.strftime("%Y-%m-%d_%H%M%S") + "_stuck-tick.txt")
+#|         path.write_text(f"tick did not return for {stuck_s:.0f} s; main thread:\n{stack_text}", encoding="utf-8")
+#|         return path
+#|     except OSError:
+#|         return None
+#| def _default_on_stuck(stack_text: str, stuck_s: float) -> None:
+#|     path = _write_stack(stack_text, stuck_s)
+#|     logger.critical("tick has not returned for %.0f s -- the agent is stuck; restarting it (details: %s)",
+#|                     stuck_s, path or "could not be written")
+#|     for handler in logging.getLogger().handlers + logger.handlers:
+#|         try:
+#|             handler.flush()
+#|         except Exception:                                   # noqa: BLE001
+#|             pass
+#|     os._exit(EXIT_STUCK)
+#| class TickWatchdog:
+#|     def __init__(self, limit_s: float = DEFAULT_LIMIT_S, *, clock=time.monotonic, on_stuck=_default_on_stuck,
+#|                  poll_s: float = 5.0):
+#|         self.limit_s = limit_s
+#|         self._clock = clock
+#|         self._on_stuck = on_stuck
+#|         self._poll_s = poll_s
+#|         self._since: float | None = None            # when the current stretch began; None = not inside one
+#|         self._thread_id: int | None = None
+#|         self._lock = threading.Lock()
+#|         self._stop = threading.Event()
+#|         self.fired = False
+#|     def enter(self) -> None:
+#|         """The main thread begins a stretch that must come back (a read, a publish)."""
+#|         with self._lock:
+#|             self._since = self._clock()
+#|             self._thread_id = threading.get_ident()
+#|     def leave(self) -> None:
+#|         with self._lock:
+#|             self._since = None
+#|     def stuck_for(self) -> float:
+#|         with self._lock:
+#|             return 0.0 if self._since is None else self._clock() - self._since
+#|     def check(self) -> bool:
+#|         """True (once) when the current stretch is over the limit; hands the main thread's stack to ``on_stuck``."""
+#|         stuck = self.stuck_for()
+#|         if stuck <= self.limit_s or self.fired:
+#|             return False
+#|         self.fired = True
+#|         frame = sys._current_frames().get(self._thread_id)
+#|         # limit given explicitly: the agent sets sys.tracebacklimit = 0, which would make this empty
+#|         text = "".join(traceback.format_stack(frame, limit=60)) if frame is not None else "(no frame)"
+#|         self._on_stuck(text, stuck)
+#|         return True
+#|     def start(self) -> None:
+#|         threading.Thread(target=self._run, name="tick-watchdog", daemon=True).start()
+#|     def stop(self) -> None:
+#|         self._stop.set()
+#|     def _run(self) -> None:
+#|         while not self._stop.wait(self._poll_s):
+#|             try:
+#|                 self.check()
+#|             except Exception:                               # noqa: BLE001 -- the watchdog must not die quietly
+#|                 logger.exception("tick watchdog failed")
 #| ===== module: agent.updater =====
 #| """agent/updater.py — fetch, verify, self-replace."""
 #| from __future__ import annotations
@@ -3249,7 +3326,7 @@ if __name__ == "__main__":
 #| # -----------------------------------------------------------------------
 #| _EMBEDDED_PUBLIC_KEY_B64 = "icsYlNSqhAir5GeHxnuou/czdXc9qnChGSBXBlyexiU="
 #| # Reported by the agent and compared against the manifest. Bump this on
-#| AGENT_VERSION = "0.87.13"
+#| AGENT_VERSION = "0.87.14"
 #| # Where packaged agents push snapshots + fetch manifests / offsets.
 #| _BAKED_PUSH_URL = "https://squadreplay.com"
 #| # How often the background updater checks. 5 min is the production
@@ -4645,12 +4722,19 @@ if __name__ == "__main__":
 #|         pusher.push(frame_json.encode('utf-8'))
 #|     except Exception:
 #|         logger.exception("position-sample push raised")
-#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep, guard=None, events=None) -> None:
+#| def _run_loop(session, *, pusher, mirror, channel, find_pid, sleep=time.sleep, guard=None, events=None,
+#|               watchdog=None) -> None:
 #|     """The open loop. ``session.tick()`` (the closed Squad tick) returns a"""
 #|     last_cycle_ms = None
 #|     while True:
 #|         try:
-#|             tick = session.tick()
+#|             if watchdog is not None:
+#|                 watchdog.enter()
+#|             try:
+#|                 tick = session.tick()
+#|             finally:
+#|                 if watchdog is not None:
+#|                     watchdog.leave()
 #|             if tick.reattach:
 #|                 # Finding the game process is ours; building the reader is the session's.
 #|                 try:
@@ -4669,11 +4753,16 @@ if __name__ == "__main__":
 #|                 sleep(tick.sleep_s)
 #|                 continue
 #|             _stamp_agent(tick.snapshot, last_cycle_ms)
+#|             if watchdog is not None:
+#|                 watchdog.enter()
 #|             try:
 #|                 _publish(tick.snapshot, pusher=pusher, mirror=mirror, channel=channel,
 #|                          offset_health=session.offset_health, events=events)
 #|             except Exception:
 #|                 logger.exception("publish failed")
+#|             finally:
+#|                 if watchdog is not None:
+#|                     watchdog.leave()
 #|             cycle_dur = time.time() - tick.cycle_start
 #|             last_cycle_ms = int(round(cycle_dur * 1000))
 #|             logger.info(tick.summary.format(cycle=cycle_dur))
@@ -5060,10 +5149,14 @@ if __name__ == "__main__":
 #|             session.add_hook(_QueueHook(enforcer))
 #|         except Exception as _e:
 #|             logger.warning("queue_priority plugin unavailable: %s", _e)
+#|     # An agent whose tick never returns restarts itself (agent/tick_watchdog.py) instead of sitting there for hours.
+#|     from agent.tick_watchdog import TickWatchdog
+#|     watchdog = TickWatchdog()
+#|     watchdog.start()
 #|     _run_loop(session, pusher=pusher, mirror=local_mirror, channel=channel,
 #|               find_pid=lambda: wait_for_squad_pid(reader_config),
 #|               guard=None if args.pid is not None else instance_guard,
-#|               events=event_log)
+#|               events=event_log, watchdog=watchdog)
 #| def _dump_crash_log(exc: BaseException) -> str | None:
 #|     """Write a per-crash forensic log so post-mortem doesn't depend on"""
 #|     try:
